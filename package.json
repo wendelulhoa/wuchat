@@ -1,0 +1,421 @@
+{
+	"name": "wuchat",
+	"displayName": "Wuchat",
+	"description": "Independent AI chat for VS Code — pluggable LLM providers, agents and tools, with its own Activity Bar area.",
+	"version": "0.2.20",
+	"publisher": "wuchat",
+	"license": "MIT",
+	"icon": "media/icon.png",
+	"engines": {
+		"vscode": "^1.125.0",
+		"node": ">=20"
+	},
+	"categories": [
+		"AI",
+		"Chat",
+		"Programming Languages"
+	],
+	"keywords": [
+		"ai",
+		"chat",
+		"agents",
+		"llm",
+		"wuchat"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/wuchat/wuchat"
+	},
+	"main": "./dist/extension.js",
+	"activationEvents": [],
+	"contributes": {
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "wuchat",
+					"title": "Wuchat",
+					"icon": "media/icon.svg"
+				}
+			]
+		},
+		"views": {
+			"wuchat": [
+				{
+					"type": "webview",
+					"id": "wuchat.chatView",
+					"name": "Chat"
+				}
+			]
+		},
+		"chatParticipants": [
+			{
+				"id": "wuchat.chat",
+				"name": "wuchat",
+				"fullName": "Wuchat",
+				"description": "Use Wuchat agents with VS Code Chat and Browser element references",
+				"isSticky": true
+			}
+		],
+		"viewsWelcome": [
+			{
+				"view": "wuchat.chatView",
+				"contents": "Welcome to **Wuchat**. Start a conversation or [connect an AI provider](command:wuchat.connectProvider)."
+			}
+		],
+		"commands": [
+			{
+				"command": "wuchat.open",
+				"title": "Wuchat: Open Chat",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.newChat",
+				"title": "Wuchat: New Chat",
+				"category": "Wuchat",
+				"icon": "$(add)"
+			},
+			{
+				"command": "wuchat.clearChat",
+				"title": "Wuchat: Clear Chat",
+				"category": "Wuchat",
+				"icon": "$(clear-all)"
+			},
+			{
+				"command": "wuchat.cancelGeneration",
+				"title": "Wuchat: Cancel Generation",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.selectAgent",
+				"title": "Wuchat: Select Agent",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.selectModel",
+				"title": "Wuchat: Select Model",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.selectProvider",
+				"title": "Wuchat: Select Provider",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.manageProvider",
+				"title": "Wuchat: Manage Provider",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.selectAgentModel",
+				"title": "Wuchat: Chat Settings",
+				"category": "Wuchat",
+				"icon": "$(settings-gear)"
+			},
+			{
+				"command": "wuchat.settings",
+				"title": "Wuchat: Chat Settings",
+				"category": "Wuchat",
+				"icon": "$(settings-gear)"
+			},
+			{
+				"command": "wuchat.history",
+				"title": "Wuchat: Chat History",
+				"category": "Wuchat",
+				"icon": "$(history)"
+			},
+			{
+				"command": "wuchat.openSession",
+				"title": "Wuchat: Open Session",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.deleteSession",
+				"title": "Delete Session",
+				"category": "Wuchat",
+				"icon": "$(trash)"
+			},
+			{
+				"command": "wuchat.clearHistory",
+				"title": "Wuchat: Clear All Sessions",
+				"category": "Wuchat",
+				"icon": "$(clear-all)"
+			},
+			{
+				"command": "wuchat.refreshViews",
+				"title": "Refresh",
+				"category": "Wuchat",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "wuchat.explainSelection",
+				"title": "Wuchat: Explain Selection",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.fixSelection",
+				"title": "Wuchat: Fix Selection",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.internal.send",
+				"title": "Send",
+				"category": "Wuchat",
+				"icon": "$(send)"
+			},
+			{
+				"command": "wuchat.internal.stop",
+				"title": "Stop",
+				"category": "Wuchat",
+				"icon": "$(debug-stop)"
+			},
+			{
+				"command": "wuchat.connectProvider",
+				"title": "Wuchat: Connect or Switch Provider",
+				"category": "Wuchat"
+			}
+		],
+		"menus": {
+			"view/title": [
+				{
+					"command": "wuchat.newChat",
+					"when": "view == wuchat.chatView",
+					"group": "navigation@1"
+				},
+				{
+					"command": "wuchat.history",
+					"when": "view == wuchat.chatView",
+					"group": "navigation@2"
+				},
+				{
+					"command": "wuchat.settings",
+					"when": "view == wuchat.chatView",
+					"group": "navigation@3"
+				}
+			],
+			"editor/context": [
+				{
+					"command": "wuchat.explainSelection",
+					"when": "editorHasSelection",
+					"group": "wuchat@1"
+				},
+				{
+					"command": "wuchat.fixSelection",
+					"when": "editorHasSelection",
+					"group": "wuchat@2"
+				}
+			],
+			"commandPalette": [
+				{
+					"command": "wuchat.cancelGeneration",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.clearChat",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.clearHistory",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.deleteSession",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.internal.send",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.internal.stop",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.manageProvider",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.openSession",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.refreshViews",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.selectAgent",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.selectAgentModel",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.selectModel",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.selectProvider",
+					"when": "false"
+				},
+				{
+					"command": "wuchat.toggleAutoApprove",
+					"when": "false"
+				}
+			]
+		},
+		"keybindings": [
+			{
+				"command": "wuchat.open",
+				"key": "ctrl+alt+w",
+				"mac": "cmd+alt+w"
+			},
+			{
+				"command": "wuchat.newChat",
+				"key": "ctrl+alt+n",
+				"mac": "cmd+alt+n"
+			}
+		],
+		"configuration": {
+			"title": "Wuchat",
+			"properties": {
+				"wuchat.provider": {
+					"type": "string",
+					"default": "claude-plan",
+					"enum": [
+						"claude-plan",
+						"openai-codex",
+						"zai-glm",
+						"echo"
+					],
+					"enumDescriptions": [
+						"Claude Plan models provided by the companion provider extension.",
+						"ChatGPT Codex models provided by the companion provider extension.",
+						"Z.AI GLM models provided by the companion provider extension.",
+						"Built-in offline echo provider."
+					],
+					"description": "Active Wuchat provider. The Claude Plan + Codex extension supplies the first three providers."
+				},
+				"wuchat.model": {
+					"type": "string",
+					"default": "",
+					"description": "Preferred model id for the active provider (empty = automatic)."
+				},
+				"wuchat.defaultAgent": {
+					"type": "string",
+					"default": "wuchat.ask",
+					"description": "Agent used when none is explicitly selected."
+				},
+				"wuchat.mode": {
+					"type": "string",
+					"default": "agent",
+					"enum": [
+						"ask",
+						"edit",
+						"agent"
+					],
+					"description": "Default chat mode."
+				},
+				"wuchat.autoApproveTools": {
+					"type": "boolean",
+					"default": false,
+					"description": "Run tools without asking for confirmation (not recommended)."
+				},
+				"wuchat.maxContext": {
+					"type": "number",
+					"default": 20,
+					"minimum": 2,
+					"description": "Maximum number of previous messages sent as context to the provider."
+				},
+				"wuchat.history.maxSessions": {
+					"type": "number",
+					"default": 50,
+					"minimum": 1,
+					"description": "Maximum number of stored sessions."
+				},
+				"wuchat.logging.level": {
+					"type": "string",
+					"default": "info",
+					"enum": [
+						"off",
+						"error",
+						"warn",
+						"info",
+						"debug",
+						"trace"
+					],
+					"description": "Wuchat output channel log level."
+				},
+				"wuchat.bridge.enableVsCodeChat": {
+					"type": "boolean",
+					"default": true,
+					"description": "Also register a 'wuchat.chat' participant in the built-in VS Code chat view (optional bridge). Wuchat does not depend on it."
+				},
+				"wuchat.agents.modelOverrides": {
+					"type": "object",
+					"default": {},
+					"additionalProperties": {
+						"type": "object",
+						"properties": {
+							"provider": {
+								"type": "string"
+							},
+							"model": {
+								"type": "string"
+							}
+						}
+					},
+					"description": "Optional provider and model overrides keyed by Wuchat agent id. Advanced users can edit this object directly."
+				},
+				"wuchat.reasoningEffort": {
+					"type": "string",
+					"default": "auto",
+					"enum": [
+						"auto",
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max",
+						"ultra"
+					],
+					"enumDescriptions": [
+						"Use the model provider default.",
+						"Low reasoning effort.",
+						"Medium reasoning effort.",
+						"High reasoning effort.",
+						"Extra high reasoning effort.",
+						"Maximum reasoning effort.",
+						"Ultra reasoning effort."
+					],
+					"description": "Reasoning effort for the selected model. Wuchat only shows levels supported by the active provider."
+				}
+			}
+		}
+	},
+	"scripts": {
+		"compile": "node build.mjs",
+		"watch": "node build.mjs --watch",
+		"typecheck": "tsc --noEmit",
+		"package": "npm run bump-version && npm run compile && vsce package --no-dependencies -o dist/",
+		"vsix": "npm run package",
+		"build": "npm run package",
+		"lint": "eslint src --ext ts",
+		"pretest": "npm run compile",
+		"test": "npm run typecheck && esbuild src/test/sanity.ts --bundle --platform=node --target=node22 --outfile=/tmp/wuchat-sanity.js && node /tmp/wuchat-sanity.js",
+		"bump-version": "node scripts/bump-version.mjs"
+	},
+	"devDependencies": {
+		"@types/mocha": "^10.0.10",
+		"@types/node": "^20.19.0",
+		"@types/vscode": "^1.125.0",
+		"@typescript-eslint/eslint-plugin": "^8.46.3",
+		"@typescript-eslint/parser": "^8.46.3",
+		"@vscode/vsce": "^3.7.1",
+		"esbuild": "^0.27.2",
+		"eslint": "^9.39.1",
+		"typescript": "^5.9.3"
+	},
+	"dependencies": {
+		"playwright-core": "^1.63.0"
+	}
+}
