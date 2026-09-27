@@ -13,6 +13,7 @@ import { EchoProvider } from './llm/providers/echoProvider';
 import { VSCodeLmProvider } from './llm/providers/vscodeLmProvider';
 import { ToolRegistry } from './tools/ToolRegistry';
 import { defaultTools } from './tools/implementations/defaultTools';
+import { registerMcpTools } from './tools/mcpBridge';
 import { registerCommands } from './extension/commands';
 import { registerVsCodeChatBridge } from './vscode/chatParticipantBridge';
 import { WuchatBrowser } from './browser/WuchatBrowser';
@@ -55,6 +56,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	}
 
 	toolRegistry.register(createBrowserTool(browser));
+	context.subscriptions.push(registerMcpTools(toolRegistry, logger));
 	const agentManager = new AgentManager(toolRegistry);
 	const sessionStore = new SessionStore(context);
 	const controller = new ChatController(agentManager, providerRegistry, sessionStore, logger);

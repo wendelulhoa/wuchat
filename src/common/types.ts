@@ -135,6 +135,8 @@ export interface AgentInvocationResult {
 	reasoning?: string;
 	/** Tool calls executed during the invocation. */
 	toolCalls: ToolCallRecord[];
+	/** Steps the agent announced it would take (shown as a checklist). */
+	plan?: string[];
 	/** Error message, if the invocation failed. */
 	error?: string;
 }
@@ -143,6 +145,8 @@ export interface AgentStreamCallbacks {
 	onText?(text: string): void;
 	onReasoning?(text: string): void;
 	onToolCall?(tool: string, status: 'started' | 'finished' | 'rejected' | 'retrying'): void;
+	/** Steps the agent announced (called once per plan announcement). */
+	onPlan?(steps: string[]): void;
 	/** Progress notes (context compaction, stream resumes, retries). */
 	onSystemMessage?(text: string): void;
 }

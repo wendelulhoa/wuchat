@@ -44,7 +44,7 @@ export class AgentManager {
 			name: 'Agent',
 			description: 'Coding agent that reads and edits files or runs commands with approval.',
 			systemPrompt: 'You are Wuchat Agent, an autonomous coding agent inside VS Code. Plan briefly, then use the supplied structured tools directly when needed. Prefer minimal, focused changes.',
-			tools: allTools,
+			tools: [...new Set([...allTools, ...customTools()])],
 			capabilities: fullCaps
 		}, this.toolRegistry));
 	}
@@ -133,6 +133,10 @@ interface ParsedAgent {
 	tools?: string[];
 	userInvocable?: boolean;
 	body: string;
+}
+
+function customTools(): string[] {
+	return vscode.workspace.getConfiguration('wuchat').get<string[]>('agent.customTools', []);
 }
 
 function parseCustomAgent(source: string, fileName: string): ParsedAgent | undefined {

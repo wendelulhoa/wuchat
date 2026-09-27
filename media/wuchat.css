@@ -84,6 +84,23 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
 #wuchat-messages > * { width: 100%; }
 .msg { min-width: 0; position: relative; word-break: break-word; }
 .msg-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; min-height: 24px; }
+.plan-steps { border: 1px solid var(--wc-border); border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; background: var(--wc-raised); }
+.plan-title { font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; color: var(--wc-muted); margin-bottom: 6px; }
+.plan-step { display: flex; align-items: baseline; gap: 7px; font-size: 11px; color: var(--wc-foreground); padding: 2px 0; }
+.plan-dot { width: 7px; height: 7px; min-width: 7px; border-radius: 50%; background: var(--wc-accent); position: relative; top: -1px; }
+.plan-step.done { color: var(--wc-muted); text-decoration: line-through; }
+.plan-step.done .plan-dot { background: var(--vscode-testing-iconPassed, #4fbf77); text-decoration: none; }
+.msg-actions { margin-left: auto; display: inline-flex; gap: 2px; opacity: 0; transition: opacity .12s; }
+.msg:hover .msg-actions, .msg:focus-within .msg-actions { opacity: 1; }
+.msg-action { border: 0; border-radius: 5px; padding: 2px 7px; background: transparent; color: var(--wc-muted); font-size: 10px; cursor: pointer; }
+.msg-action:hover { color: var(--wc-foreground); background: var(--wc-hover); }
+#wuchat-queue { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+#wuchat-queue[hidden] { display: none; }
+.queue-item { display: flex; align-items: center; gap: 6px; border: 1px solid var(--wc-border); border-radius: 8px; padding: 4px 8px; background: var(--wc-raised); font-size: 11px; }
+.queue-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--wc-muted); }
+.queue-action { border: 0; border-radius: 5px; padding: 1px 6px; background: transparent; color: var(--wc-muted); font-size: 10px; cursor: pointer; flex: none; }
+.queue-action:hover { color: var(--wc-foreground); background: var(--wc-hover); }
+#wuchat-context-meter { font-variant-numeric: tabular-nums; }
 .msg-avatar { width: 22px; height: 22px; border-radius: 7px; flex: none; }
 .msg-agent { color: var(--wc-foreground); font-size: 11px; font-weight: 650; letter-spacing: .025em; }
 .msg-body { white-space: pre-wrap; line-height: 1.62; }

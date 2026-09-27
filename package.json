@@ -2,7 +2,7 @@
 	"name": "wuchat",
 	"displayName": "Wuchat",
 	"description": "Independent AI chat for VS Code — pluggable LLM providers, agents and tools, with its own Activity Bar area.",
-	"version": "0.2.20",
+	"version": "0.2.24",
 	"publisher": "wuchat",
 	"license": "MIT",
 	"icon": "media/icon.png",
@@ -319,6 +319,22 @@
 					"type": "boolean",
 					"default": false,
 					"description": "Run tools without asking for confirmation (not recommended)."
+				},
+				"wuchat.tools.enabled": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [],
+					"description": "Tools disabled for all agents. Empty list keeps every registered tool available. Use tool ids like wuchat.runCommand, wuchat.browser or mcp.<name>."
+				},
+				"wuchat.agent.customTools": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [],
+					"description": "Extra tool ids (including MCP tools) granted to the built-in Agent on top of its defaults."
 				},
 				"wuchat.maxContext": {
 					"type": "number",

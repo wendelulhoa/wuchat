@@ -63,6 +63,8 @@ export class BaseAgent implements Agent {
 		const toolCalls: ToolCallRecord[] = [];
 		let text = '';
 		let reasoning = '';
+		let plan: string[] | undefined;
+		let planAnnounced = false;
 		let history = await buildContext(request, llm, model, callbacks);
 		const tools = buildToolDefinitions(this.tools, this.toolRegistry);
 		const prompt = buildPrompt(this.systemPrompt, { ...request, tools });
@@ -118,6 +120,13 @@ export class BaseAgent implements Agent {
 			if (continueRound) {
 				round--;
 				continue;
+			}
+
+			// Announce the steps (tool sequence) as a checklist before running them.
+			if (!planAnnounced && toolRequests.length > 0) {
+				planAnnounced = true;
+				plan = toolRequests.map(call => describeStep(call, this.tools, this.toolRegistry));
+				callbacks.onPlan?.(plan);
 			}
 
 			if (request.token.isCancellationRequested || toolRequests.length === 0) {
@@ -176,14 +185,32 @@ export class BaseAgent implements Agent {
 		if (request.token.isCancellationRequested) {
 			text += '\n\n_(generation cancelled)_';
 		}
-		return { text: text.trimEnd(), reasoning: reasoning || undefined, toolCalls };
+		return { text: text.trimEnd(), reasoning: reasoning || undefined, toolCalls, plan };
 	}
 }
 
+/** Human-readable label for a planned tool call step. */
+function describeStep(call: ToolCallRequest, agentTools: readonly string[], registry: ToolRegistry): string {
+	const toolId = agentTools.find(id => toModelToolName(id) === call.tool) ?? call.tool;
+	const input = toolInputToString(call.input);
+	let detail = '';
+	try {
+		const parsed = JSON.parse(input) as { input?: string; url?: string; selector?: string; command?: string; path?: string };
+		detail = parsed.input ?? parsed.url ?? parsed.selector ?? parsed.command ?? parsed.path ?? input;
+	} catch {
+		detail = input;
+	}
+	const tool = registry.get(toolId);
+	const name = tool?.name ?? toolId;
+	detail = detail.replace(/\s+/g, ' ').trim().slice(0, 60);
+	return detail ? `${name}: ${detail}` : name;
+}
+
 function buildToolDefinitions(toolIds: readonly string[], registry: ToolRegistry): ChatRequest['tools'] {
+	const disabled = new Set(vscode.workspace.getConfiguration('wuchat').get<string[]>('tools.enabled', []));
 	return toolIds.flatMap(id => {
 		const tool = registry.get(id);
-		if (!tool) {
+		if (!tool || disabled.has(id)) {
 			return [];
 		}
 		return [{

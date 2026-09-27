@@ -146,12 +146,33 @@ function makeMessageHeader(message) {
 	return header;
 }
 
-function addMessageElement(message) {
+function addMessageElement(message, messageIndex = -1) {
 	messagesEl.querySelector('.wuchat-welcome')?.remove();
 	const wasNearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 100;
 	const wrap = document.createElement('article');
 	wrap.className = `msg msg-${message.role}`;
-	if (message.role !== 'system') wrap.appendChild(makeMessageHeader(message));
+	if (message.role !== 'system') {
+		const header = makeMessageHeader(message);
+		if (messageIndex >= 0 && message.content) {
+			const actions = document.createElement('span');
+			actions.className = 'msg-actions';
+			const copy = document.createElement('button');
+			copy.className = 'msg-action';
+			copy.dataset.action = 'copyMessage';
+			copy.dataset.messageIndex = String(messageIndex);
+			copy.textContent = 'Copy';
+			copy.title = 'Copy message';
+			const fork = document.createElement('button');
+			fork.className = 'msg-action';
+			fork.dataset.action = 'forkSession';
+			fork.dataset.upToIndex = String(messageIndex);
+			fork.textContent = 'Fork';
+			fork.title = 'Continue this conversation in a new branch from here';
+			actions.append(copy, fork);
+			header.appendChild(actions);
+		}
+		wrap.appendChild(header);
+	}
 	const body = document.createElement('div');
 	body.className = 'msg-body';
 	body.innerHTML = renderMarkdown(message.content);
@@ -262,8 +283,11 @@ function renderMessages(messages) {
 		messagesEl.appendChild(welcome);
 		return;
 	}
-	for (const message of messages) addMessageElement(message);
-	messagesEl.scrollTop = messagesEl.scrollHeight;
+let index = 0;
+for (const message of messages) {
+	addMessageElement(message, index++);
+}
+messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 function relativeTime(timestamp) {
@@ -382,14 +406,54 @@ function setBusy(value) {
 	updateComposer();
 }
 
-function sendPrompt() {
+function sendPrompt(steer = false) {
 	const text = inputEl.value.trim();
-	if (!text || busy) return;
+	if (!text) return;
+	if (busy && !steer) {
+		// Queue the message while the agent is still working.
+		queued.push({ text, agentId: currentAgentId });
+		inputEl.value = '';
+		updateComposer();
+		renderQueue();
+		post({ type: 'queueSync', items: queued });
+		return;
+	}
 	inputEl.value = '';
 	updateComposer();
 	showSessions(false);
 	setBusy(true);
-	post({ type: 'send', text, agentId: currentAgentId });
+	post(steer ? { type: 'steer', text, agentId: currentAgentId } : { type: 'send', text, agentId: currentAgentId });
+}
+
+let queued = [];
+
+function renderQueue() {
+	const strip = document.getElementById('wuchat-queue');
+	if (!strip) return;
+	strip.replaceChildren();
+	strip.hidden = queued.length === 0;
+	queued.forEach((item, index) => {
+		const row = document.createElement('div');
+		row.className = 'queue-item';
+		const label = document.createElement('span');
+		label.className = 'queue-text';
+		label.textContent = item.text;
+		label.title = item.text;
+		const sendNow = document.createElement('button');
+		sendNow.className = 'queue-action';
+		sendNow.textContent = 'Send now';
+		sendNow.title = 'Move to the front and send immediately';
+		sendNow.dataset.action = 'sendNow';
+		sendNow.dataset.queueIndex = String(index);
+		const remove = document.createElement('button');
+		remove.className = 'queue-action';
+		remove.textContent = '×';
+		remove.title = 'Remove from queue';
+		remove.dataset.action = 'remove';
+		remove.dataset.queueIndex = String(index);
+		row.append(label, sendNow, remove);
+		strip.appendChild(row);
+	});
 }
 
 document.getElementById('wuchat-attach').addEventListener('click', () => post({ type: 'attachFiles' }));
@@ -418,6 +482,31 @@ inputEl.addEventListener('keydown', event => {
 	if (event.key === 'Enter' && !event.shiftKey) {
 		event.preventDefault();
 		sendPrompt();
+	}
+});
+// Ctrl+Enter while the agent is working steers the running response.
+inputEl.addEventListener('keydown', event => {
+	if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && busy) {
+		event.preventDefault();
+		sendPrompt(true);
+	}
+});
+document.getElementById('wuchat-queue').addEventListener('click', event => {
+	const button = event.target.closest('.queue-action');
+	if (!button) return;
+	const index = Number(button.dataset.queueIndex);
+	if (button.dataset.action === 'sendNow') {
+		const [item] = queued.splice(index, 1);
+		if (item) {
+			renderQueue();
+			post({ type: 'queueSync', items: queued });
+			setBusy(true);
+			post({ type: 'send', text: item.text, agentId: item.agentId });
+		}
+	} else if (button.dataset.action === 'remove') {
+		queued.splice(index, 1);
+		renderQueue();
+		post({ type: 'queueSync', items: queued });
 	}
 });
 document.getElementById('wuchat-new').addEventListener('click', () => {
@@ -451,6 +540,8 @@ messagesEl.addEventListener('click', event => {
 		if (action === 'connect') post({ type: 'connectProvider' });
 		else if (action === 'testProvider') post({ type: 'testProvider', providerId: button.dataset.providerId });
 		else if (action === 'retry') post({ type: 'retry' });
+		else if (action === 'copyMessage') post({ type: 'copyMessage', messageIndex: Number(button.dataset.messageIndex) });
+		else if (action === 'forkSession') post({ type: 'forkSession', upToIndex: Number(button.dataset.upToIndex) });
 		else {
 			const pre = button.parentElement?.previousElementSibling;
 			const code = pre?.textContent ?? '';
@@ -494,6 +585,11 @@ window.addEventListener('message', event => {
 				attachmentsEl.appendChild(tag);
 			}
 			renderMessages(message.messages ?? []);
+			const meter = document.getElementById('wuchat-context-meter');
+			if (meter && message.contextEstimate) {
+				meter.textContent = `${message.contextEstimate.tokens.toLocaleString()} tokens · ${message.contextEstimate.messages} msg`;
+				meter.title = 'Estimated context size sent to the model. Use Wuchat: Compact Context to summarize older turns.';
+			}
 			if (message.transientError) addTransientError(message.transientError);
 			break;
 		}
@@ -508,6 +604,13 @@ window.addEventListener('message', event => {
 			break;
 		case 'streamEnd':
 			setBusy(false);
+			if (queued.length) {
+				const next = queued.shift();
+				renderQueue();
+				post({ type: 'queueSync', items: queued });
+				setBusy(true);
+				post({ type: 'send', text: next.text, agentId: next.agentId });
+			}
 			break;
 		case 'userMessage':
 			addMessageElement(message.message);
@@ -556,6 +659,34 @@ window.addEventListener('message', event => {
 			}
 			break;
 		}
+		case 'plan': {
+			const pending = document.getElementById('wuchat-pending');
+			if (pending) {
+				let steps = pending.querySelector('.plan-steps');
+				if (!steps) {
+					steps = document.createElement('div');
+					steps.className = 'plan-steps';
+					pending.appendChild(steps);
+				}
+				steps.replaceChildren();
+				const title = document.createElement('div');
+				title.className = 'plan-title';
+				title.textContent = 'Steps';
+				steps.appendChild(title);
+				for (const step of message.steps ?? []) {
+					const row = document.createElement('div');
+					row.className = 'plan-step';
+					const dot = document.createElement('span');
+					dot.className = 'plan-dot';
+					const label = document.createElement('span');
+					label.textContent = step;
+					row.append(dot, label);
+					steps.appendChild(row);
+				}
+				messagesEl.scrollTop = messagesEl.scrollHeight;
+			}
+			break;
+		}
 		case 'toolCall': {
 			const pending = document.getElementById('wuchat-pending');
 			if (pending) {
@@ -566,8 +697,10 @@ window.addEventListener('message', event => {
 					status.dataset.tool = message.tool;
 					pending.appendChild(status);
 				}
-				status.dataset.status = message.status;
+			status.dataset.status = message.status;
 				status.textContent = `${message.status === 'started' ? 'Running' : message.status === 'retrying' ? 'Retrying' : message.status === 'finished' ? 'Completed' : 'Skipped'} · ${message.tool}`;
+				const stepRow = [...(pending.querySelector('.plan-steps')?.querySelectorAll('.plan-step') ?? [])].find(row => row.textContent === message.tool || row.textContent.startsWith(message.tool + ':') || row.textContent.startsWith(message.tool + ' '));
+				if (stepRow) stepRow.classList.toggle('done', message.status === 'finished');
 			}
 			break;
 		}

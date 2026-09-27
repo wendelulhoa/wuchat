@@ -17,6 +17,7 @@ export interface StreamCallbacks {
 	onChunk?(text: string): void;
 	onReasoning?(text: string): void;
 	onToolCall?(tool: string, status: 'started' | 'finished' | 'rejected' | 'retrying'): void;
+	onPlan?(steps: string[]): void;
 	onAssistantDone?(message: ChatMessage): void;
 	onSystemMessage?(text: string): void;
 	onError?(text: string): void;
@@ -52,6 +53,12 @@ export class ChatController {
 		return this.cancellations.size > 0;
 	}
 
+	/** Rough context size (tokens ≈ chars/4) the next request would carry. */
+	get contextEstimate(): { tokens: number; messages: number } {
+		const chars = this._session.messages.reduce((sum, message) => sum + message.content.length, 0);
+		return { tokens: Math.ceil(chars / 4), messages: this._session.messages.length };
+	}
+
 	setSession(session: ChatSession): void {
 		this._session = session;
 	}
@@ -68,6 +75,11 @@ export class ChatController {
 		}
 		this._session = ChatSession.from(stored);
 		return true;
+	}
+
+	/** Persists a session (used by forks before switching to them). */
+	async saveSession(session: ChatSession): Promise<void> {
+		await this.sessionStore.save(session.toStored());
 	}
 
 	async deleteSession(id: string): Promise<void> {
@@ -136,7 +148,9 @@ export class ChatController {
 			const result = await agent.invoke(request, provider, modelId, {
 				onText: text => callbacks.onChunk?.(text),
 				onReasoning: text => callbacks.onReasoning?.(text),
-				onToolCall: (tool, status) => callbacks.onToolCall?.(tool, status)
+				onToolCall: (tool, status) => callbacks.onToolCall?.(tool, status),
+				onPlan: steps => callbacks.onPlan?.(steps),
+				onSystemMessage: text => callbacks.onSystemMessage?.(text)
 			});
 			const assistantMessage: ChatMessage = {
 				role: 'assistant',

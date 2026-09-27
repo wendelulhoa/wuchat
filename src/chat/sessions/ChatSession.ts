@@ -57,6 +57,15 @@ export class ChatSession {
 		}
 	}
 
+	/** Creates an independent copy of this conversation up to `upToIndex` (inclusive). */
+	fork(upToIndex = this.messages.length - 1): ChatSession {
+		const copy = new ChatSession(`${this.title} (fork)`);
+		copy.messages = structuredClone(this.messages.slice(0, upToIndex + 1));
+		copy.createdAt = Date.now();
+		copy.updatedAt = copy.createdAt;
+		return copy;
+	}
+
 	/** Replaces the message list (used by context compaction). */
 	replaceMessages(messages: ChatMessage[]): void {
 		this.messages = [...messages];

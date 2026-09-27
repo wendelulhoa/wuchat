@@ -26,6 +26,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 	private transientError?: string;
 	private browserElement?: string;
 	private lastRequest?: { text: string; agentId?: string; context: RequestContext };
+	private queue: Array<{ text: string; agentId?: string; steer: boolean }> = [];
 
 	constructor(
 		private readonly extensionUri: vscode.Uri,
@@ -56,14 +57,51 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 		if (typeof message !== 'object' || message === null) {
 			return;
 		}
-		const msg = message as { type?: string; text?: string; sessionId?: string; providerId?: string; agentId?: string; model?: { provider: string; id: string } | null; effort?: string; attachmentIndex?: number };
+		const msg = message as { type?: string; text?: string; sessionId?: string; providerId?: string; agentId?: string; model?: { provider: string; id: string } | null; effort?: string; attachmentIndex?: number; steer?: boolean; messageIndex?: number; upToIndex?: number; queueAction?: string; queueIndex?: number; items?: Array<{ text?: string; agentId?: string }> };
 		switch (msg.type) {
 			case 'ready':
 				await this.postState();
 				break;
 			case 'send':
+				if (this.streaming) {
+					this.queue.push({ text: msg.text ?? '', agentId: msg.agentId, steer: false });
+					await this.postQueue();
+					break;
+				}
 				await this.send(msg.text ?? '', msg.agentId);
 				break;
+			case 'steer':
+				// Send immediately: the controller is busy, the text is appended to
+				// the running turn's session and the model sees it next round.
+				await this.send(msg.text ?? '', msg.agentId);
+				break;
+			case 'queueSync':
+				// Reconcile the extension-side queue with the webview after edits.
+				this.queue = (msg.items ?? []).map(item => ({ text: item.text ?? '', agentId: msg.agentId, steer: false }));
+				break;
+			case 'queueAction': {
+				if (msg.queueAction === 'clear') this.queue = [];
+				else if (msg.queueAction === 'remove' && typeof msg.queueIndex === 'number') this.queue.splice(msg.queueIndex, 1);
+				else if (msg.queueAction === 'sendNow' && typeof msg.queueIndex === 'number') {
+					const [item] = this.queue.splice(msg.queueIndex, 1);
+					if (item) await this.send(item.text, item.agentId);
+				}
+				await this.postQueue();
+				break;
+			}
+			case 'copyMessage':
+				if (typeof msg.messageIndex === 'number') {
+					const target = this.controller.session.messages[msg.messageIndex];
+					if (target) await vscode.env.clipboard.writeText(target.content);
+				}
+				break;
+			case 'forkSession': {
+				const forked = this.controller.session.fork(typeof msg.upToIndex === 'number' ? msg.upToIndex : undefined);
+				await this.controller.saveSession(forked);
+				this.controller.setSession(forked);
+				await this.postState();
+				break;
+			}
 			case 'stop':
 				this.controller.cancel();
 				break;
@@ -280,6 +318,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 				onChunk: chunk => post({ type: 'assistantChunk', text: chunk }),
 				onReasoning: chunk => post({ type: 'assistantReasoning', text: chunk }),
 				onToolCall: (tool, status) => post({ type: 'toolCall', tool, status }),
+				onPlan: steps => post({ type: 'plan', steps }),
 				onAssistantDone: message => post({ type: 'assistantDone', message }),
 				onSystemMessage: text => post({ type: 'system', text }),
 				onError: text => { this.transientError = text; post({ type: 'error', text }); }
@@ -288,7 +327,21 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			this.streaming = false;
 			post({ type: 'streamEnd' });
 			await this.postState();
+			await this.drainQueue();
 		}
+	}
+
+	/** Sends queued messages one by one after the current turn ends. */
+	private async drainQueue(): Promise<void> {
+		if (this.streaming || this.queue.length === 0 || !this.view) return;
+		const next = this.queue.shift()!;
+		await this.postQueue();
+		await this.send(next.text, next.agentId);
+	}
+
+	private async postQueue(): Promise<void> {
+		if (!this.view) return;
+		await this.view.webview.postMessage({ type: 'queue', items: this.queue.map(item => ({ text: item.text })) });
 	}
 
 	/** Shows an informational line in the chat (e.g. compaction progress). */
@@ -322,6 +375,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			messages: this.controller.session.messages,
 			sessions: this.controller.sessionSummaries,
 			currentSessionId: this.controller.session.id,
+			contextEstimate: this.controller.contextEstimate,
 			workspaceName: vscode.workspace.workspaceFolders?.[0]?.name ?? 'No workspace',
 			autoApproveTools: config.get<boolean>('autoApproveTools', false),
 			attachments: [...this.attachments.map((file, index) => ({ name: file.name, index })), ...(this.browserElement ? [{ name: 'Browser element', browserElement: true }] : [])],
@@ -386,7 +440,8 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 				<button class="secondary-button composer-icon-button" id="wuchat-stop" style="display:none" aria-label="Stop response" title="Stop response" type="button"></button>
 			</div>
 		</div>
-		<div class="composer-status"><span id="wuchat-workspace-label"></span><span class="status-separator">·</span><label class="sr-only" for="wuchat-approval-mode">Tool approval</label><select id="wuchat-approval-mode" title="Tool approval for this session"><option value="ask">Ask every time</option><option value="session">Approve for me · session</option><option value="configured" disabled>Auto approve in Settings</option></select><button class="composer-browser" id="wuchat-browser" title="Open Wuchat Browser to select elements or capture screenshots" aria-label="Open Wuchat Browser">Browser ↗</button></div>
+		<div id="wuchat-queue" hidden></div>
+		<div class="composer-status"><span id="wuchat-workspace-label"></span><span class="status-separator">·</span><span id="wuchat-context-meter" title="Estimated context size"></span><span class="status-separator">·</span><label class="sr-only" for="wuchat-approval-mode">Tool approval</label><select id="wuchat-approval-mode" title="Tool approval for this session"><option value="ask">Ask every time</option><option value="session">Approve for me · session</option><option value="configured" disabled>Auto approve in Settings</option></select><button class="composer-browser" id="wuchat-browser" title="Open Wuchat Browser to select elements or capture screenshots" aria-label="Open Wuchat Browser">Browser ↗</button></div>
 	</footer>
 	<script nonce="${nonce}" src="${script}"></script>
 </body>

@@ -17,6 +17,10 @@ export class ToolRegistry {
 		this.tools.set(tool.id, tool);
 	}
 
+	unregister(id: string): void {
+		this.tools.delete(id);
+	}
+
 	get(id: string): WuchatTool | undefined {
 		return this.tools.get(id);
 	}
