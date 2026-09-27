@@ -121,6 +121,13 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 					await this.postState();
 				}
 				break;
+			case 'deleteSession':
+				if (msg.sessionId) {
+					await this.controller.deleteSession(msg.sessionId);
+					if (this.controller.session.id === msg.sessionId) this.controller.newSession();
+					await this.postState();
+				}
+				break;
 			case 'showSessions':
 				await vscode.commands.executeCommand('wuchat.history');
 				break;

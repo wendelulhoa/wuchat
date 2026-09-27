@@ -233,6 +233,9 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
 .session-title { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
 .session-meta { display: block; margin-top: 2px; color: var(--wc-muted); font-size: 10px; }
 .session-age { margin-left: auto; flex: none; color: var(--wc-muted); font-size: 10px; }
+.session-delete { flex: none; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; border-radius: 5px; color: var(--wc-muted); font-size: 12px; cursor: pointer; opacity: 0; transition: opacity .12s; }
+.session-row:hover .session-delete, .session-delete:focus { opacity: 1; }
+.session-delete:hover { color: var(--vscode-errorForeground, #f66); background: var(--wc-hover); }
 .session-empty { padding: 34px 12px; text-align: center; color: var(--wc-muted); font-size: 12px; }
 
 /* Composer */

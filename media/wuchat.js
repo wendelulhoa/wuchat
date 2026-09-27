@@ -254,6 +254,9 @@ function addMessageElement(message, messageIndex = -1) {
 }
 
 function renderMessages(messages) {
+	// While streaming, keep the live pending bubble (and its partial text)
+	// instead of wiping it — a state refresh must not interrupt the response.
+	const pending = document.getElementById('wuchat-pending');
 	messagesEl.replaceChildren();
 	if (!messages.length) {
 		const welcome = document.createElement('div');
@@ -286,6 +289,10 @@ function renderMessages(messages) {
 let index = 0;
 for (const message of messages) {
 	addMessageElement(message, index++);
+}
+if (pending) {
+	// Re-append the streaming bubble so partial text keeps updating.
+	messagesEl.appendChild(pending);
 }
 messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -350,7 +357,12 @@ function renderSessions() {
 		const age = document.createElement('span');
 		age.className = 'session-age';
 		age.textContent = relativeTime(session.updatedAt);
-		row.append(dot, copy, age);
+		const del = document.createElement('span');
+		del.className = 'session-delete';
+		del.textContent = '×';
+		del.dataset.deleteSessionId = session.id;
+		del.title = 'Delete conversation';
+		row.append(dot, copy, age, del);
 		sessionList.appendChild(row);
 	}
 }
@@ -520,6 +532,12 @@ document.getElementById('wuchat-browser').addEventListener('click', () => post({
 document.getElementById('wuchat-approval-mode').addEventListener('change', event => post({ type: 'setApprovalMode', effort: event.target.value }));
 sessionSearch.addEventListener('input', renderSessions);
 sessionList.addEventListener('click', event => {
+	const del = event.target.closest('[data-delete-session-id]');
+	if (del) {
+		event.stopPropagation();
+		post({ type: 'deleteSession', sessionId: del.dataset.deleteSessionId });
+		return;
+	}
 	const row = event.target.closest('[data-session-id]');
 	if (!row) return;
 	showSessions(false);
@@ -616,6 +634,7 @@ window.addEventListener('message', event => {
 			addMessageElement(message.message);
 			break;
 		case 'assistantStart': {
+			document.getElementById('wuchat-pending')?.remove();
 			const pending = document.createElement('article');
 			pending.className = 'msg msg-assistant';
 			pending.id = 'wuchat-pending';
