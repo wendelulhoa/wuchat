@@ -3,7 +3,6 @@
  *  Agents own instructions, model preferences, tools and context policy.
  *--------------------------------------------------------------------------------------------*/
 
-import * as vscode from 'vscode';
 import {
 	Agent,
 	AgentCapabilities,
@@ -27,6 +26,12 @@ export interface AgentOptions {
 	capabilities: AgentCapabilities;
 	provider?: string;
 	model?: string;
+	runtime?: {
+		maxContextMessages?: number | (() => number);
+		disabledTools?: () => readonly string[];
+		autoApproveTools?: () => boolean;
+		confirm?: (title: string, detail: string) => Promise<boolean>;
+	};
 }
 
 /** Base agent implementation with streaming and bounded structured tool use. */
@@ -65,8 +70,15 @@ export class BaseAgent implements Agent {
 		let reasoning = '';
 		let plan: string[] | undefined;
 		let planAnnounced = false;
-		let history = await buildContext(request, llm, model, callbacks);
-		const tools = buildToolDefinitions(this.tools, this.toolRegistry);
+		const maxContextMessages = this.options.runtime?.maxContextMessages;
+		let history = await buildContext(
+			request,
+			llm,
+			model,
+			callbacks,
+			typeof maxContextMessages === 'function' ? maxContextMessages() : maxContextMessages ?? 40
+		);
+		const tools = buildToolDefinitions(this.tools, this.toolRegistry, this.options.runtime?.disabledTools?.() ?? []);
 		const prompt = buildPrompt(this.systemPrompt, { ...request, tools });
 
 		for (let round = 0; round < 5; round++) {
@@ -154,7 +166,13 @@ export class BaseAgent implements Agent {
 				let lastError: unknown;
 				for (let attempt = 1; attempt <= MAX_TOOL_RETRIES; attempt++) {
 					try {
-						output = await this.toolRegistry.run(toolId, rawInput, this.toolRegistry.isSessionAutoApproved || autoApprove(), request.token, requestConfirm);
+						output = await this.toolRegistry.run(
+							toolId,
+							rawInput,
+							this.toolRegistry.isSessionAutoApproved || (this.options.runtime?.autoApproveTools?.() ?? false),
+							request.token,
+							this.options.runtime?.confirm ?? denyConfirmation
+						);
 						lastError = undefined;
 						break;
 					} catch (err) {
@@ -206,8 +224,8 @@ function describeStep(call: ToolCallRequest, agentTools: readonly string[], regi
 	return detail ? `${name}: ${detail}` : name;
 }
 
-function buildToolDefinitions(toolIds: readonly string[], registry: ToolRegistry): ChatRequest['tools'] {
-	const disabled = new Set(vscode.workspace.getConfiguration('wuchat').get<string[]>('tools.enabled', []));
+function buildToolDefinitions(toolIds: readonly string[], registry: ToolRegistry, disabledTools: readonly string[]): ChatRequest['tools'] {
+	const disabled = new Set(disabledTools);
 	return toolIds.flatMap(id => {
 		const tool = registry.get(id);
 		if (!tool || disabled.has(id)) {
@@ -288,7 +306,8 @@ async function buildContext(
 	request: ChatRequest,
 	llm: LLMProvider,
 	model: string,
-	callbacks: AgentStreamCallbacks
+	callbacks: AgentStreamCallbacks,
+	maxContextMessages: number
 ): Promise<ChatMessage[]> {
 	const history: ChatMessage[] = request.history.map(message => ({ ...message }));
 	const markers = history.filter(message => message.role === 'system' && message.content.startsWith('[context summary]'));
@@ -297,7 +316,7 @@ async function buildContext(
 	const rest = history.slice(baseIndex);
 
 	const totalChars = rest.reduce((sum, message) => sum + message.content.length, 0);
-	const budget = Math.max(4, maxContext());
+	const budget = Math.max(4, maxContextMessages);
 	if (totalChars <= APPROX_CONTEXT_CHARS && rest.length <= budget) {
 		return history;
 	}
@@ -347,15 +366,6 @@ async function summarize(llm: LLMProvider, model: string, transcript: string, to
 	return summary.trim().slice(0, 12_000);
 }
 
-function maxContext(): number {
-	return vscode.workspace.getConfiguration('wuchat').get<number>('maxContext', 40);
-}
-
-function autoApprove(): boolean {
-	return vscode.workspace.getConfiguration('wuchat').get<boolean>('autoApproveTools', false);
-}
-
-async function requestConfirm(title: string, detail: string): Promise<boolean> {
-	const choice = await vscode.window.showWarningMessage(title, { modal: true, detail }, 'Allow', 'Deny');
-	return choice === 'Allow';
+async function denyConfirmation(): Promise<boolean> {
+	return false;
 }

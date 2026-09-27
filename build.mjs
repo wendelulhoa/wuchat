@@ -1,5 +1,5 @@
 import * as esbuild from 'esbuild';
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync } from 'node:fs';
 
 const watch = process.argv.includes('--watch');
 
@@ -28,4 +28,16 @@ if (watch) {
 	console.log('[wuchat] watching for changes...');
 } else {
 	await esbuild.build(options);
+	await esbuild.build({
+		entryPoints: ['src/cli/main.ts'],
+		bundle: true,
+		outfile: 'dist/wuchat.cjs',
+		format: 'cjs',
+		platform: 'node',
+		target: 'node20',
+		minify: false,
+		logLevel: 'info',
+		legalComments: 'none'
+	});
+	chmodSync('dist/wuchat.cjs', 0o755);
 }

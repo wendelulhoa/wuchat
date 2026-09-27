@@ -27,6 +27,9 @@
 		"url": "https://github.com/wuchat/wuchat"
 	},
 	"main": "./dist/extension.js",
+	"bin": {
+		"wuchat": "./dist/wuchat.cjs"
+	},
 	"activationEvents": [],
 	"contributes": {
 		"viewsContainers": {
@@ -415,6 +418,7 @@
 		"package": "npm run bump-version && npm run compile && vsce package --no-dependencies -o dist/",
 		"vsix": "npm run package",
 		"build": "npm run package",
+		"install-local": "node scripts/install.mjs",
 		"lint": "eslint src --ext ts",
 		"pretest": "npm run compile",
 		"test": "npm run typecheck && esbuild src/test/sanity.ts --bundle --platform=node --target=node22 --outfile=/tmp/wuchat-sanity.js && node /tmp/wuchat-sanity.js",

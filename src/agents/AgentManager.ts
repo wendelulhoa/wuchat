@@ -27,7 +27,8 @@ export class AgentManager {
 			description: 'Answers questions about your code and workspace. Read-only.',
 			systemPrompt: 'You are Wuchat Ask, a concise coding assistant embedded in VS Code. Answer clearly, use fenced code blocks for code, and prefer Markdown.',
 			tools: ['wuchat.readFile', 'wuchat.listWorkspace', 'wuchat.openFile'],
-			capabilities: readWorkspaceCaps
+			capabilities: readWorkspaceCaps,
+			runtime: extensionAgentRuntime
 		}, this.toolRegistry));
 
 		this.register(new BaseAgent({
@@ -36,7 +37,8 @@ export class AgentManager {
 			description: 'Explains the selected code or the current file in depth.',
 			systemPrompt: 'You are Wuchat Explain. Produce a structured, in-depth explanation of the given code: purpose, behavior, edge cases and suggestions.',
 			tools: ['wuchat.readFile', 'wuchat.listWorkspace'],
-			capabilities: readWorkspaceCaps
+			capabilities: readWorkspaceCaps,
+			runtime: extensionAgentRuntime
 		}, this.toolRegistry));
 
 		this.register(new BaseAgent({
@@ -45,7 +47,8 @@ export class AgentManager {
 			description: 'Coding agent that reads and edits files or runs commands with approval.',
 			systemPrompt: 'You are Wuchat Agent, an autonomous coding agent inside VS Code. Plan briefly, then use the supplied structured tools directly when needed. Prefer minimal, focused changes.',
 			tools: [...new Set([...allTools, ...customTools()])],
-			capabilities: fullCaps
+			capabilities: fullCaps,
+			runtime: extensionAgentRuntime
 		}, this.toolRegistry));
 	}
 
@@ -116,7 +119,8 @@ export class AgentManager {
 					description: parsed.description || `${folder.name} · ${relative}`,
 					systemPrompt: parsed.body || `Follow the ${name} custom agent instructions.`,
 					tools,
-					capabilities
+						capabilities,
+						runtime: extensionAgentRuntime
 				}, this.toolRegistry);
 				this.agents.set(agent.id, agent);
 				this.workspaceAgentIds.add(agent.id);
@@ -126,6 +130,16 @@ export class AgentManager {
 		}
 	}
 }
+
+const extensionAgentRuntime = {
+	maxContextMessages: () => vscode.workspace.getConfiguration('wuchat').get<number>('maxContext', 40),
+	disabledTools: () => vscode.workspace.getConfiguration('wuchat').get<string[]>('tools.enabled', []),
+	autoApproveTools: () => vscode.workspace.getConfiguration('wuchat').get<boolean>('autoApproveTools', false),
+	confirm: async (title: string, detail: string) => {
+		const choice = await vscode.window.showWarningMessage(title, { modal: true, detail }, 'Allow', 'Deny');
+		return choice === 'Allow';
+	}
+};
 
 interface ParsedAgent {
 	name?: string;

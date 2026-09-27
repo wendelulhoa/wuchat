@@ -22,4 +22,12 @@ Run `npm run build` or `npm run vsix` to create a VSIX. Each packaging build inc
 
 Install the generated VSIX with **Extensions: Install from VSIX…** in VS Code.
 
+## Standalone CLI
+
+Run `npm run install-local` and choose **Standalone CLI** to install `wuchat` in `~/.local/bin`, or choose the VS Code extension option to build and install a local VSIX. Node.js 20 or later is required.
+
+The CLI uses direct provider API access; it does not inherit VS Code companion-extension sign-in or subscription credentials. Set one of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `ZAI_API_KEY`, then optionally set `WUCHAT_PROVIDER` (`openai`, `anthropic`, or `zai`) and `WUCHAT_MODEL`. OpenAI-compatible endpoints can be overridden with `OPENAI_BASE_URL` or `ZAI_BASE_URL`. The workspace is the current directory, or `WUCHAT_WORKSPACE` when set.
+
+Start a persistent SSH chat inside tmux with `tmux new -s wuchat -- wuchat`. Detach with `Ctrl+B`, then `D`; reconnect using `tmux attach -t wuchat`. The CLI stores conversations under `~/.wuchat/sessions`; use `wuchat --session ID` to resume one. `wuchat --agent` enables file writes and shell commands, each with an approval prompt; `--yes` allows them without prompts.
+
 See [docs/architecture.md](docs/architecture.md) for implementation details and provider boundaries.
