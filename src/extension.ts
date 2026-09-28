@@ -18,6 +18,7 @@ import { registerCommands } from './extension/commands';
 import { registerVsCodeChatBridge } from './vscode/chatParticipantBridge';
 import { WuchatBrowser } from './browser/WuchatBrowser';
 import { createBrowserTool } from './browser/browserTool';
+import { ExtensionCliBridge } from './cli/extensionBridge';
 
 export function activate(context: vscode.ExtensionContext): void {
 	const logger = new Logger();
@@ -33,6 +34,9 @@ export function activate(context: vscode.ExtensionContext): void {
 		connectCommand: 'claudePlan.login',
 		testConnectionCommand: 'claudePlan.testConnection'
 	}));
+	const cliBridge = new ExtensionCliBridge(providerRegistry, logger);
+	context.subscriptions.push(cliBridge);
+	void cliBridge.start().catch(error => logger.warn('Could not start the connected CLI provider bridge.', error));
 	providerRegistry.register(new VSCodeLmProvider({
 		id: 'openai-codex',
 		name: 'ChatGPT Codex',

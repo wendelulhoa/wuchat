@@ -20,7 +20,7 @@ try {
 		copyFileSync('dist/wuchat.cjs', target);
 		chmodSync(target, 0o755);
 		console.log(`Installed ${target}`);
-		console.log('Ensure ~/.local/bin is on PATH, then set a provider API key (see README.md).');
+		console.log('Ensure ~/.local/bin is on PATH. Wuchat authentication is used by default when its VS Code bridge is active.');
 	} else if (choice === '2') {
 		const build = spawnSync('npm', ['run', 'compile'], { stdio: 'inherit' });
 		if (build.status !== 0) process.exit(build.status ?? 1);

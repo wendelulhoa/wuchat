@@ -6,8 +6,74 @@ import {
 	ModelInfo,
 	ToolCallRequest
 } from '../common/types';
+import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import * as path from 'node:path';
 
 export type CliProviderId = 'openai' | 'anthropic' | 'zai';
+
+interface BridgeDescriptor { port: number; token: string }
+interface ConnectedConfig { provider: string; name: string; model: string }
+interface ConnectedModels { provider: string; name: string; models: Array<{ id: string; name: string; detail?: string }> }
+
+const bridgeDescriptorPath = path.join(homedir(), '.wuchat', 'vscode-provider.json');
+
+async function bridgeRequest(pathname: string, init?: RequestInit): Promise<Response> {
+	const descriptor = await readBridgeDescriptor();
+	return fetch(`http://127.0.0.1:${descriptor.port}${pathname}`, {
+		...init,
+		headers: { authorization: `Bearer ${descriptor.token}`, ...(init?.headers ?? {}) }
+	});
+}
+
+export async function listConnectedModels(): Promise<ConnectedModels> {
+	const response = await bridgeRequest('/models');
+	if (!response.ok) {
+		const detail = await response.text();
+		throw new Error(detail || `Wuchat provider bridge returned HTTP ${response.status}.`);
+	}
+	return response.json() as Promise<ConnectedModels>;
+}
+
+export async function setConnectedModel(model: string): Promise<void> {
+	const response = await bridgeRequest('/model', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ model })
+	});
+	if (!response.ok) {
+		const detail = await response.text();
+		throw new Error(detail || `Could not switch model (HTTP ${response.status}).`);
+	}
+}
+
+export async function connectedCliProvider(): Promise<{ provider: LLMProvider; model: string }> {
+	const response = await bridgeRequest('/config');
+	if (!response.ok) throw new Error('Wuchat VS Code provider bridge is not available. Keep VS Code open and Wuchat activated.');
+	const config = await response.json() as ConnectedConfig;
+	let activeOverride: string | undefined;
+	const provider: LLMProvider & { setModel?: (model: string) => void } = {
+		id: `vscode-bridge:${config.provider}`,
+		name: `${config.name} (VS Code sign-in)`,
+		chat: (request) => streamConnected(request, activeOverride),
+		setModel(model: string) { activeOverride = model; }
+	};
+	return { model: config.model, provider };
+}
+
+export async function resolveCliProvider(options: { connectedOnly?: boolean; apiMode?: boolean }): Promise<{ provider: LLMProvider; model: string }> {
+	if (options.connectedOnly) return connectedCliProvider();
+	if (options.apiMode || process.env.WUCHAT_PROVIDER) {
+		return configuredCliProvider();
+	}
+	try {
+		return await connectedCliProvider();
+	} catch {
+		throw new Error(
+			'No authenticated Wuchat provider bridge is active. Open VS Code, authenticate/select a provider in Wuchat, then run “Wuchat: Open Connected CLI”. To use an API key explicitly, set WUCHAT_PROVIDER and its matching API key.'
+		);
+	}
+}
 
 export function createCliProvider(id: CliProviderId): LLMProvider {
 	return {
@@ -20,9 +86,9 @@ export function createCliProvider(id: CliProviderId): LLMProvider {
 }
 
 export function configuredCliProvider(): { provider: LLMProvider; model: string } {
-	const id = (process.env.WUCHAT_PROVIDER ?? 'openai').toLowerCase() as CliProviderId;
+	const id = (process.env.WUCHAT_PROVIDER ?? '').toLowerCase() as CliProviderId;
 	if (!['openai', 'anthropic', 'zai'].includes(id)) {
-		throw new Error('WUCHAT_PROVIDER must be openai, anthropic, or zai.');
+		throw new Error('Set WUCHAT_PROVIDER to openai, anthropic, or zai to select direct API-key mode.');
 	}
 	const keyName = id === 'anthropic' ? 'ANTHROPIC_API_KEY' : id === 'zai' ? 'ZAI_API_KEY' : 'OPENAI_API_KEY';
 	if (!process.env[keyName]) {
@@ -163,6 +229,33 @@ function toToolCall(id: string, name: string, rawInput: string): ToolCallRequest
 function chatCompletionsEndpoint(baseUrl: string | undefined, fallback: string): string {
 	const normalized = (baseUrl ?? fallback).replace(/\/+$/, '');
 	return normalized.endsWith('/chat/completions') ? normalized : `${normalized}/chat/completions`;
+}
+
+async function* streamConnected(request: ChatRequest, modelOverride?: string): AsyncIterable<ChatChunk> {
+	const descriptor = await readBridgeDescriptor();
+	const response = await fetch(`http://127.0.0.1:${descriptor.port}/chat`, {
+		method: 'POST',
+		headers: { authorization: `Bearer ${descriptor.token}`, 'content-type': 'application/json' },
+		body: JSON.stringify({ request: { ...request, token: undefined }, ...(modelOverride ? { modelOverride } : {}) })
+	});
+	if (!response.ok) {
+		const detail = await response.text();
+		throw new Error(detail || `Wuchat provider bridge returned HTTP ${response.status}.`);
+	}
+	for await (const data of readSse(response)) {
+		if (data === '[DONE]') break;
+		yield JSON.parse(data) as ChatChunk;
+	}
+}
+
+async function readBridgeDescriptor(): Promise<BridgeDescriptor> {
+	try {
+		const descriptor = JSON.parse(await readFile(bridgeDescriptorPath, 'utf8')) as BridgeDescriptor;
+		if (!Number.isInteger(descriptor.port) || typeof descriptor.token !== 'string') throw new Error();
+		return descriptor;
+	} catch {
+		throw new Error('Wuchat VS Code provider bridge was not found. Open VS Code with Wuchat active, then run `wuchat --connected`.');
+	}
 }
 
 async function* readSse(response: Response): AsyncIterable<string> {

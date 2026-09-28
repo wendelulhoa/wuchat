@@ -68,6 +68,8 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
 }
 .vscode-button:hover, .vscode-button[aria-pressed="true"] { background: var(--wc-hover); color: var(--wc-foreground); }
 .vscode-button svg { width: 15px; height: 15px; }
+.vscode-button#wuchat-cli { width: auto; padding: 0 9px; font-size: 10.5px; font-weight: 650; letter-spacing: .05em; }
+.msg-execution { font-size: 8.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--wc-muted); border: 1px solid var(--wc-hover); border-radius: 4px; padding: 0 4px; margin-left: 5px; }
 
 /* Conversation canvas */
 #wuchat-content { min-height: 0; flex: 1; display: flex; flex-direction: column; }

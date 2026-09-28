@@ -3,10 +3,14 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import * as path from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { readdir, readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { AgentManager } from '../agents/AgentManager';
 import { ChatController } from '../chat/controllers/ChatController';
 import { WuchatChatView } from '../chat/views/WuchatChatView';
-import { SessionStore } from '../chat/history/SessionStore';
+import { SessionStore, StoredSession } from '../chat/history/SessionStore';
 import { Logger } from '../common/logger';
 import { ProviderRegistry } from '../llm/ProviderRegistry';
 
@@ -24,6 +28,23 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
 
 	async function revealChat(): Promise<void> {
 		await vscode.commands.executeCommand('wuchat.chatView.focus');
+	}
+
+	async function openConnectedCli(): Promise<void> {
+		const workspace = vscode.workspace.workspaceFolders?.[0];
+		if (!workspace) {
+			vscode.window.showWarningMessage('Open a workspace folder before starting the Wuchat CLI.');
+			return;
+		}
+		const executable = process.platform === 'win32'
+			? 'wuchat'
+			: path.join(homedir(), '.local', 'bin', 'wuchat');
+		const quote = process.platform === 'win32'
+			? (value: string) => `"${value.replace(/"/g, '\\"')}"`
+			: (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+		const terminal = vscode.window.createTerminal({ name: 'Wuchat CLI', cwd: workspace.uri.fsPath });
+		terminal.show(true);
+		terminal.sendText(`${quote(executable)} --connected`, true);
 	}
 
 	async function chooseAgent(): Promise<string | undefined> {
@@ -121,8 +142,10 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
 			{ label: '$(key) Connect or switch provider…', description: `Current: ${provider?.name ?? providerId}`, action: 'connect' },
 			{ label: '$(gear) Sign-in and API key settings…', description: `Manage ${provider?.name ?? providerId}`, action: 'manage' },
 			{ label: '$(check) Test provider connection', description: provider?.name ?? providerId, action: 'test' },
+			{ label: '$(terminal) Open connected CLI', description: 'Use the selected VS Code provider and model', action: 'cli' },
 			{ label: '$(hubot) Choose default agent…', description: agent?.name ?? agentId, action: 'agent' },
 			{ label: '$(history) Conversation history…', description: 'Reopen a saved chat', action: 'history' },
+			{ label: '$(cloud-download) Import CLI sessions…', description: 'Bring ~/.wuchat sessions into this history', action: 'importCli' },
 			{ label: '$(tools) Tool permissions and approval…', description: 'Control edit and terminal confirmations', action: 'tools' },
 			{ label: '$(settings-gear) Advanced Wuchat settings…', description: 'Context, history retention, and other preferences', action: 'advanced' }
 		];
@@ -131,10 +154,12 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
 			return;
 		}
 		switch (pick.action) {
+			case 'cli': await openConnectedCli(); break;
 			case 'connect': await connectProvider(); break;
 			case 'manage': await manageCurrentProvider(); break;
 			case 'test': await testCurrentProvider(); break;
 			case 'history': await pickSessionAndOpen(); break;
+			case 'importCli': await importCliSessions(); break;
 			case 'tools': await vscode.commands.executeCommand('workbench.action.openSettings', 'wuchat.autoApproveTools'); break;
 			case 'agent': {
 				const agentId = await chooseAgent();
@@ -179,8 +204,50 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
 		}
 	}
 
+	/** Imports CLI sessions from ~/.wuchat/sessions into the Wuchat history. */
+	async function importCliSessions(): Promise<void> {
+		const dir = path.join(homedir(), '.wuchat', 'sessions');
+		let files: string[];
+		try {
+			files = (await readdir(dir)).filter(name => name.endsWith('.json'));
+		} catch {
+			vscode.window.showInformationMessage('Wuchat: no CLI session directory found (~/.wuchat/sessions).');
+			return;
+		}
+		let imported = 0;
+		let skipped = 0;
+		for (const file of files) {
+			try {
+				const raw = JSON.parse(await readFile(path.join(dir, file), 'utf8')) as {
+					id?: string; workspace?: string; updatedAt?: string; provider?: string; model?: string;
+					messages?: StoredSession['messages'];
+				};
+				if (!Array.isArray(raw.messages) || raw.messages.length === 0) {
+					skipped++;
+					continue;
+				}
+				const id = `cli-${raw.id ?? file.replace(/\.json$/, '')}`;
+				const updatedAt = raw.updatedAt ? Date.parse(raw.updatedAt) : Date.now();
+				const source = path.basename(raw.workspace ?? 'workspace');
+				await sessionStore.save({
+					id,
+					title: `[CLI] ${raw.messages.find(m => m.role === 'user')?.content.slice(0, 36) || id}`,
+					createdAt: Number.isFinite(updatedAt) ? updatedAt - 1 : Date.now(),
+					updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
+					messages: raw.messages
+				});
+				imported++;
+			} catch {
+				skipped++;
+			}
+		}
+		await chatView.refresh();
+		vscode.window.showInformationMessage(`Wuchat: imported ${imported} CLI session(s)${skipped ? `, skipped ${skipped}` : ''}.`);
+	}
+
 	return [
 		vscode.commands.registerCommand('wuchat.open', revealChat),
+		vscode.commands.registerCommand('wuchat.openConnectedCli', openConnectedCli),
 		vscode.commands.registerCommand('wuchat.newChat', async () => {
 			await chatView.newChat();
 			await revealChat();
@@ -219,6 +286,7 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
 		vscode.commands.registerCommand('wuchat.settings', openChatSettings),
 		vscode.commands.registerCommand('wuchat.testProvider', testCurrentProvider),
 		vscode.commands.registerCommand('wuchat.history', pickSessionAndOpen),
+		vscode.commands.registerCommand('wuchat.importCliSessions', importCliSessions),
 		vscode.commands.registerCommand('wuchat.openSession', async (sessionId?: string) => {
 			if (typeof sessionId === 'string' && await controller.loadSession(sessionId)) {
 				await chatView.refresh();

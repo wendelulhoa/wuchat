@@ -26,7 +26,9 @@ Install the generated VSIX with **Extensions: Install from VSIX…** in VS Code.
 
 Run `npm run install-local` and choose **Standalone CLI** to install `wuchat` in `~/.local/bin`, or choose the VS Code extension option to build and install a local VSIX. Node.js 20 or later is required.
 
-The CLI uses direct provider API access; it does not inherit VS Code companion-extension sign-in or subscription credentials. Set one of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `ZAI_API_KEY`, then optionally set `WUCHAT_PROVIDER` (`openai`, `anthropic`, or `zai`) and `WUCHAT_MODEL`. OpenAI-compatible endpoints can be overridden with `OPENAI_BASE_URL` or `ZAI_BASE_URL`. The workspace is the current directory, or `WUCHAT_WORKSPACE` when set.
+By default, the CLI uses the provider and model currently selected in Wuchat through an authenticated loopback bridge. Keep VS Code open and run `wuchat`, or choose **Wuchat: Open Connected CLI** from the Command Palette or Wuchat settings. No API key or provider CLI installation is needed. The extension never copies provider credentials into the CLI; the bridge only forwards requests while the Wuchat extension host is active. If the bridge is unavailable, activate Wuchat in VS Code and authenticate/select a provider there.
+
+Direct API access is an optional alternative: pass `--api`, set `WUCHAT_PROVIDER` (`openai`, `anthropic`, or `zai`), and provide the matching `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `ZAI_API_KEY`. `WUCHAT_MODEL` selects the model, and OpenAI-compatible endpoints can be overridden with `OPENAI_BASE_URL` or `ZAI_BASE_URL`. The workspace is the current directory, or `WUCHAT_WORKSPACE` when set.
 
 Start a persistent SSH chat inside tmux with `tmux new -s wuchat -- wuchat`. Detach with `Ctrl+B`, then `D`; reconnect using `tmux attach -t wuchat`. The CLI stores conversations under `~/.wuchat/sessions`; use `wuchat --session ID` to resume one. `wuchat --agent` enables file writes and shell commands, each with an approval prompt; `--yes` allows them without prompts.
 

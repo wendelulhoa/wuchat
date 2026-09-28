@@ -12,6 +12,7 @@ const stopBtn = document.getElementById('wuchat-stop');
 const agentSelect = document.getElementById('wuchat-agent');
 const modelSelect = document.getElementById('wuchat-model');
 const effortSelect = document.getElementById('wuchat-effort');
+const executionModeSelect = document.getElementById('wuchat-execution-mode');
 const brandIcon = document.getElementById('wuchat-brand-icon');
 
 const ICONS = {
@@ -143,6 +144,12 @@ function makeMessageHeader(message) {
 	label.className = 'msg-agent';
 	label.textContent = message.role === 'user' ? 'You' : message.agent || 'Wuchat';
 	header.appendChild(label);
+	if (message.role === 'assistant' && message.executionMode) {
+		const badge = document.createElement('span');
+		badge.className = 'msg-execution';
+		badge.textContent = message.executionMode === 'cli' ? 'CLI' : 'Local';
+		header.appendChild(badge);
+	}
 	return header;
 }
 
@@ -528,8 +535,10 @@ document.getElementById('wuchat-new').addEventListener('click', () => {
 });
 historyBtn.addEventListener('click', () => showSessions(!showingSessions));
 document.getElementById('wuchat-settings').addEventListener('click', () => post({ type: 'openSettings' }));
+document.getElementById('wuchat-cli').addEventListener('click', () => post({ type: 'openCli' }));
 document.getElementById('wuchat-browser').addEventListener('click', () => post({ type: 'openBrowser' }));
 document.getElementById('wuchat-approval-mode').addEventListener('change', event => post({ type: 'setApprovalMode', effort: event.target.value }));
+executionModeSelect.addEventListener('change', event => post({ type: 'setExecutionMode', effort: event.target.value }));
 sessionSearch.addEventListener('input', renderSessions);
 sessionList.addEventListener('click', event => {
 	const del = event.target.closest('[data-delete-session-id]');
@@ -584,6 +593,15 @@ window.addEventListener('message', event => {
 			renderSessions();
 			document.getElementById('wuchat-workspace-label').textContent = message.workspaceName || 'No workspace';
 			document.getElementById('wuchat-approval-mode').value = message.approvalMode || 'ask';
+			if (!executionModeSelect.options.length) {
+				for (const [value, label] of [['local', 'Local'], ['cli', 'CLI']]) {
+					const option = document.createElement('option');
+					option.value = value;
+					option.textContent = label;
+					executionModeSelect.appendChild(option);
+				}
+			}
+			executionModeSelect.value = message.executionMode || 'local';
 			attachmentsEl.replaceChildren();
 			for (const attachment of message.attachments ?? []) {
 				const tag = document.createElement('span');
@@ -638,7 +656,7 @@ window.addEventListener('message', event => {
 			const pending = document.createElement('article');
 			pending.className = 'msg msg-assistant';
 			pending.id = 'wuchat-pending';
-			pending.appendChild(makeMessageHeader({ role: 'assistant', agent: message.agent }));
+			pending.appendChild(makeMessageHeader({ role: 'assistant', agent: message.agent, executionMode: message.executionMode }));
 			const body = document.createElement('div');
 			body.className = 'msg-body pending-indicator';
 			body.id = 'wuchat-pending-text';
@@ -725,7 +743,7 @@ window.addEventListener('message', event => {
 		}
 		case 'assistantDone':
 			document.getElementById('wuchat-pending')?.remove();
-			addMessageElement(message.message);
+			addMessageElement({ ...message.message, executionMode: message.executionMode });
 			break;
 		case 'system':
 			addMessageElement({ role: 'system', content: message.text });

@@ -2,7 +2,7 @@
 	"name": "wuchat",
 	"displayName": "Wuchat",
 	"description": "Independent AI chat for VS Code — pluggable LLM providers, agents and tools, with its own Activity Bar area.",
-	"version": "0.2.26",
+	"version": "0.2.35",
 	"publisher": "wuchat",
 	"license": "MIT",
 	"icon": "media/icon.png",
@@ -66,6 +66,17 @@
 			}
 		],
 		"commands": [
+			{
+				"command": "wuchat.importCliSessions",
+				"title": "Wuchat: Import CLI Sessions",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.openConnectedCli",
+				"title": "Wuchat: Open Connected CLI",
+				"category": "Wuchat",
+				"icon": "$(terminal)"
+			},
 			{
 				"command": "wuchat.open",
 				"title": "Wuchat: Open Chat",
