@@ -14,6 +14,8 @@ export class ChatSession {
 	createdAt: number;
 	updatedAt: number;
 	messages: ChatMessage[];
+	running?: boolean;
+	processId?: number;
 
 	constructor(title = 'New chat', id?: string) {
 		this.id = id ?? `session-${Date.now()}-${sessionCounter++}`;
@@ -29,6 +31,8 @@ export class ChatSession {
 		session.createdAt = stored.createdAt;
 		session.updatedAt = stored.updatedAt;
 		session.messages = stored.messages;
+		session.running = stored.running;
+		session.processId = stored.processId;
 		return session;
 	}
 	get lastUserMessage(): string {
@@ -78,7 +82,9 @@ export class ChatSession {
 			title: this.title,
 			createdAt: this.createdAt,
 			updatedAt: this.updatedAt,
-			messages: this.messages
+			messages: this.messages,
+			running: this.running,
+			processId: this.processId
 		};
 	}
 }

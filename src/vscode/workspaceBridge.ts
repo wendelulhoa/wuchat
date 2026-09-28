@@ -55,14 +55,69 @@ export function getActiveSelection(): { uri: string; text: string; language: str
 	};
 }
 
-export async function runTerminalCommand(command: string): Promise<string> {
-	let terminal = vscode.window.terminals.find(t => t.name === 'Wuchat');
+export async function runTerminalCommand(
+	command: string,
+	confirm: (title: string, detail: string) => Promise<boolean>
+): Promise<string> {
+	if (!command) {
+		throw new Error('Wuchat: terminal command cannot be empty.');
+	}
+	if (isDestructiveCommand(command) && !await confirm('Wuchat: confirm potentially destructive command', command)) {
+		return 'Command was not approved by the user.';
+	}
+	let terminal = vscode.window.terminals.find(t => t.name === 'Wuchat Agent');
 	if (!terminal) {
-		terminal = vscode.window.createTerminal({ name: 'Wuchat' });
+		const root = vscode.workspace.workspaceFolders?.[0];
+		terminal = vscode.window.createTerminal({ name: 'Wuchat Agent', cwd: root?.uri });
 	}
 	terminal.show(true);
-	terminal.sendText(command, true);
-	return `Command sent to the "Wuchat" terminal: ${command}`;
+	const shellIntegration = terminal.shellIntegration ?? await waitForShellIntegration(terminal);
+	if (!shellIntegration) {
+		terminal.sendText(command, true);
+		return 'Command sent to the Wuchat Agent terminal. Shell integration is unavailable, so command output and exit status could not be collected.';
+	}
+	const execution = shellIntegration.executeCommand(command);
+	let output = '';
+	for await (const chunk of execution.read()) {
+		if (output.length < 24_000) {
+			output += chunk.slice(0, 24_000 - output.length);
+		}
+	}
+	const exitCode = await execution.exitCode;
+	const cleanedOutput = output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').trim();
+	return [
+		`Command exited with code ${exitCode ?? 'unknown'}.`,
+		cleanedOutput || '(no output)',
+		output.length > 24_000 ? '[Output truncated]' : ''
+	].filter(Boolean).join('\n');
+}
+
+function waitForShellIntegration(terminal: vscode.Terminal): Promise<vscode.TerminalShellIntegration | undefined> {
+	return new Promise(resolve => {
+		if (terminal.shellIntegration) {
+			resolve(terminal.shellIntegration);
+			return;
+		}
+		const subscription = vscode.window.onDidChangeTerminalShellIntegration(event => {
+			if (event.terminal === terminal) {
+				clearTimeout(timeout);
+				subscription.dispose();
+				resolve(event.shellIntegration);
+			}
+		});
+		const timeout = setTimeout(() => {
+			subscription.dispose();
+			resolve(terminal.shellIntegration);
+		}, 3000);
+	});
+}
+
+function isDestructiveCommand(command: string): boolean {
+	return /(?:^|[;&|()]\s*)(?:sudo\s+)?(?:rm|rmdir|del|erase|format|mkfs(?:\.\w+)?|diskpart|dd|truncate)\b/i.test(command)
+		|| /\bfind\b[^;&|]*\s-delete\b/i.test(command)
+		|| /\bchmod\b[^;&|]*\s-R\b/i.test(command)
+		|| /\bchown\b[^;&|]*\s-R\b/i.test(command)
+		|| /\bgit\s+(?:reset\s+--hard|clean\s+[^;&|]*-f|checkout\s+--|restore\s+--worktree|push\s+[^;&|]*--force)/i.test(command);
 }
 
 export async function listWorkspaceTree(limit = 50): Promise<string> {

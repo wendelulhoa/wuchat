@@ -54,6 +54,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	const browser = new WuchatBrowser();
 	context.subscriptions.push(browser);
+	context.subscriptions.push(
+		vscode.commands.registerCommand('wuchat.pickBrowserElement', async () => {
+			try { await browser.pickBrowserElement(); }
+			catch (error) { void vscode.window.showErrorMessage(`Wuchat: ${error instanceof Error ? error.message : String(error)}`); }
+		}),
+		vscode.commands.registerCommand('wuchat.captureBrowser', async () => {
+			try { await browser.captureScreenshot(); }
+			catch (error) { void vscode.window.showErrorMessage(`Wuchat: ${error instanceof Error ? error.message : String(error)}`); }
+		})
+	);
 	const toolRegistry = new ToolRegistry();
 	for (const tool of defaultTools) {
 		toolRegistry.register(tool);
@@ -65,7 +75,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	const sessionStore = new SessionStore(context);
 	const controller = new ChatController(agentManager, providerRegistry, sessionStore, logger);
 	const chatView = new WuchatChatView(context.extensionUri, controller, agentManager, providerRegistry, logger, browser, toolRegistry);
-	browser.setContextHandlers(description => chatView.addBrowserElement(description), (data, url) => chatView.addBrowserScreenshot(data, url));
+	browser.setContextHandlers((description, screenshot, url) => chatView.addBrowserElement(description, screenshot, url), (data, url) => chatView.addBrowserScreenshot(data, url));
 	void agentManager.refreshWorkspaceAgents().then(() => chatView.refresh());
 
 	context.subscriptions.push(
@@ -92,7 +102,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	refreshAgentWatchers();
 	context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
 		refreshAgentWatchers();
-		browser.setContextHandlers(description => chatView.addBrowserElement(description), (data, url) => chatView.addBrowserScreenshot(data, url));
+		browser.setContextHandlers((description, screenshot, url) => chatView.addBrowserElement(description, screenshot, url), (data, url) => chatView.addBrowserScreenshot(data, url));
 	void agentManager.refreshWorkspaceAgents().then(() => chatView.refresh());
 	}));
 

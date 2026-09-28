@@ -13,6 +13,8 @@ export interface StoredSession {
 	createdAt: number;
 	updatedAt: number;
 	messages: ChatMessage[];
+	running?: boolean;
+	processId?: number;
 }
 
 /**
@@ -70,13 +72,35 @@ export class SessionStore implements vscode.Disposable {
 		await this.context.globalState.update(SessionStore.INDEX_KEY, this.index);
 	}
 
+	async reconcileRunning(): Promise<void> {
+		for (const session of this.sessions) {
+			if (!session.running || isProcessAlive(session.processId)) continue;
+			const messages = [...session.messages];
+			if (messages.at(-1)?.role === 'user') {
+				messages.push({
+					role: 'assistant',
+					content: '_(CLI process stopped before completing this response. The user prompt and previous history were preserved.)_',
+					agent: 'CLI Agent',
+					error: 'Process interrupted'
+				});
+			}
+			await this.context.globalState.update(SessionStore.SESSION_PREFIX + session.id, {
+				...session,
+				updatedAt: Date.now(),
+				messages,
+				running: false,
+				processId: undefined
+			});
+		}
+	}
+
 	private async trim(): Promise<void> {
 		const max = Math.max(1, vscode.workspace.getConfiguration('wuchat').get<number>('history.maxSessions', 50));
 		const ordered = this.sessions;
 		if (ordered.length <= max) {
 			return;
 		}
-		const remove = ordered.slice(max);
+		const remove = ordered.filter(session => !session.running).slice(max);
 		for (const s of remove) {
 			await this.delete(s.id);
 		}
@@ -84,5 +108,15 @@ export class SessionStore implements vscode.Disposable {
 
 	dispose(): void {
 		this.indexListener.dispose();
+	}
+}
+
+function isProcessAlive(pid: number | undefined): boolean {
+	if (!Number.isInteger(pid) || !pid || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === 'EPERM';
 	}
 }

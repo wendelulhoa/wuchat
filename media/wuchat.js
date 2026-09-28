@@ -153,6 +153,201 @@ function makeMessageHeader(message) {
 	return header;
 }
 
+function createActivity() {
+	const activity = document.createElement('details');
+	activity.className = 'msg-activity';
+	const summary = document.createElement('summary');
+	const title = document.createElement('strong');
+	title.textContent = 'Activity';
+	const count = document.createElement('span');
+	count.className = 'activity-count';
+	const meter = document.createElement('span');
+	meter.className = 'activity-meter';
+	meter.setAttribute('aria-hidden', 'true');
+	meter.appendChild(document.createElement('span'));
+	summary.append(title, count, meter);
+	const steps = document.createElement('div');
+	steps.className = 'activity-steps';
+	steps.setAttribute('role', 'list');
+	activity.append(summary, steps);
+	return activity;
+}
+
+function addActivityStep(activity, step) {
+	const steps = activity.querySelector('.activity-steps');
+	let row = [...steps.children].find(item => item.dataset.stepId === step.id);
+	if (!row) {
+		row = document.createElement('div');
+		row.className = 'activity-step';
+		row.setAttribute('role', 'listitem');
+		row.dataset.stepId = step.id;
+		row.dataset.status = 'queued';
+		const header = document.createElement('div');
+		header.className = 'activity-step-header';
+		const marker = document.createElement('span');
+		marker.className = 'activity-marker';
+		marker.setAttribute('aria-hidden', 'true');
+		const label = document.createElement('span');
+		label.className = 'activity-label';
+		const status = document.createElement('span');
+		status.className = 'activity-status';
+		header.append(marker, label, status);
+		row.appendChild(header);
+		steps.appendChild(row);
+	}
+	row.querySelector('.activity-label').textContent = step.label;
+	return row;
+}
+
+function updateActivitySummary(activity) {
+	const rows = [...activity.querySelectorAll('.activity-step')];
+	const completed = rows.filter(row => ['finished', 'failed', 'rejected'].includes(row.dataset.status)).length;
+	const active = rows.find(row => ['awaiting', 'started', 'retrying'].includes(row.dataset.status));
+	const issues = rows.filter(row => ['failed', 'rejected'].includes(row.dataset.status)).length;
+	const count = activity.querySelector('.activity-count');
+	count.textContent = active ? `${completed}/${rows.length} · ${({ awaiting: 'Awaiting approval', retrying: 'Retrying', started: 'Running' })[active.dataset.status]}`
+		: issues ? `${completed}/${rows.length} · ${issues} needs attention`
+			: `${completed}/${rows.length} steps`;
+	activity.querySelector('.activity-meter span').style.width = `${rows.length ? completed / rows.length * 100 : 0}%`;
+}
+
+function updateActivityStep(activity, progress) {
+	const row = addActivityStep(activity, { id: progress.id, label: progress.label });
+	row.dataset.status = progress.status;
+	row.querySelector('.activity-status').textContent = ({ queued: 'Waiting', awaiting: 'Approval', started: 'Running', retrying: 'Retrying', finished: 'Done', failed: 'Failed', rejected: 'Skipped' })[progress.status] || progress.status;
+	if (!progress.output && progress.status === 'finished') row.querySelector('.activity-result')?.remove();
+	if (progress.output) {
+		let result = row.querySelector('.activity-result');
+		if (!result) {
+			result = document.createElement('details');
+			result.className = 'activity-result';
+			const summary = document.createElement('summary');
+			summary.textContent = 'View result';
+			const output = document.createElement('pre');
+			result.append(summary, output);
+			row.appendChild(result);
+		}
+		result.querySelector('pre').textContent = String(progress.output).slice(0, 2000);
+	}
+	updateActivitySummary(activity);
+}
+
+function renderTodos(wrap, todos) {
+	let panel = wrap.querySelector('.msg-todos');
+	if (!todos?.length) { panel?.remove(); return; }
+	if (!panel) {
+		panel = document.createElement('details');
+		panel.className = 'msg-todos';
+		panel.open = true;
+		const summary = document.createElement('summary');
+		const title = document.createElement('strong');
+		title.textContent = 'Tasks';
+		const count = document.createElement('span');
+		count.className = 'todo-count';
+		summary.append(title, count);
+		const list = document.createElement('div');
+		list.className = 'todo-list';
+		list.setAttribute('role', 'list');
+		panel.append(summary, list);
+		wrap.insertBefore(panel, wrap.querySelector('.msg-changes, .msg-activity, .msg-body'));
+	}
+	panel.querySelector('.todo-count').textContent = `${todos.filter(item => item.status === 'completed').length}/${todos.length}`;
+	const list = panel.querySelector('.todo-list');
+	const current = new Map([...list.children].map(row => [row.dataset.todoId, row]));
+	for (const item of todos) {
+		let row = current.get(item.id);
+		if (!row) {
+			row = document.createElement('div');
+			row.className = 'todo-item';
+			row.setAttribute('role', 'listitem');
+			row.dataset.todoId = item.id;
+			const marker = document.createElement('span');
+			marker.className = 'todo-marker';
+			marker.setAttribute('aria-hidden', 'true');
+			const label = document.createElement('span');
+			label.className = 'todo-label';
+			const state = document.createElement('span');
+			state.className = 'todo-status';
+			row.append(marker, label, state);
+		}
+		row.dataset.status = item.status;
+		row.querySelector('.todo-label').textContent = item.title;
+		row.querySelector('.todo-status').textContent = ({ 'not-started': 'Waiting', 'in-progress': 'In progress', completed: 'Done' })[item.status];
+		list.appendChild(row);
+		current.delete(item.id);
+	}
+	for (const row of current.values()) row.remove();
+}
+
+function addFileChange(wrap, change) {
+	if (!change?.path) return;
+	let panel = wrap.querySelector('.msg-changes');
+	if (!panel) {
+		panel = document.createElement('details');
+		panel.className = 'msg-changes';
+		panel.open = true;
+		const summary = document.createElement('summary');
+		const title = document.createElement('strong');
+		title.textContent = 'Files changed';
+		const count = document.createElement('span');
+		count.className = 'change-count';
+		summary.append(title, count);
+		const list = document.createElement('div');
+		list.className = 'change-list';
+		panel.append(summary, list);
+		wrap.insertBefore(panel, wrap.querySelector('.msg-activity, .msg-body'));
+	}
+	const list = panel.querySelector('.change-list');
+	const file = document.createElement('details');
+	file.className = 'change-file';
+	const summary = document.createElement('summary');
+	const name = document.createElement('span');
+	name.className = 'change-path';
+	name.textContent = change.path;
+	name.title = change.path;
+	const counts = document.createElement('span');
+	counts.className = 'change-stats';
+	if (change.created) {
+		const badge = document.createElement('span');
+		badge.className = 'change-created';
+		badge.textContent = 'New';
+		counts.appendChild(badge);
+	}
+	const added = document.createElement('span');
+	added.className = 'change-added-count';
+	added.textContent = `+${change.added}`;
+	const removed = document.createElement('span');
+	removed.className = 'change-removed-count';
+	removed.textContent = `-${change.removed}`;
+	counts.append(added, removed);
+	summary.append(name, counts);
+	const preview = document.createElement('div');
+	preview.className = 'change-preview';
+	for (const [kind, text] of [['removed', change.before], ['added', change.after]]) {
+		if (!text) continue;
+		const lines = document.createElement('pre');
+		lines.className = `change-${kind}`;
+		lines.textContent = text.split('\n').map(line => `${kind === 'added' ? '+' : '-'} ${line}`).join('\n');
+		preview.appendChild(lines);
+	}
+	const open = document.createElement('button');
+	open.type = 'button';
+	open.className = 'change-open';
+	open.dataset.filePath = change.path;
+	open.textContent = 'Open file';
+	open.title = `Open ${change.path} in VS Code`;
+	preview.appendChild(open);
+	file.append(summary, preview);
+	list.appendChild(file);
+	panel.querySelector('.change-count').textContent = `${new Set([...list.querySelectorAll('.change-path')].map(item => item.textContent)).size}`;
+}
+
+function followResponse(update) {
+	const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 100;
+	update();
+	if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
 function addMessageElement(message, messageIndex = -1) {
 	messagesEl.querySelector('.wuchat-welcome')?.remove();
 	const wasNearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 100;
@@ -211,7 +406,28 @@ function addMessageElement(message, messageIndex = -1) {
 		reasoning.className = 'reasoning-content';
 		reasoning.innerHTML = renderMarkdown(message.reasoning);
 		details.append(summary, reasoning);
-		wrap.appendChild(details);
+		wrap.insertBefore(details, body);
+	}
+	if (message.todos?.length) renderTodos(wrap, message.todos);
+	for (const call of message.toolCalls ?? []) {
+		if (call.status === 'finished' && call.change) addFileChange(wrap, call.change);
+	}
+	if (message.plan?.length || message.toolCalls?.length) {
+		const activity = createActivity();
+		for (const [index, step] of (message.plan ?? []).entries()) {
+			addActivityStep(activity, typeof step === 'string' ? { id: `legacy-${index}`, label: step } : step);
+		}
+		for (const [index, call] of (message.toolCalls ?? []).entries()) {
+			const step = message.plan?.find(item => item.id === call.id);
+			updateActivityStep(activity, {
+				id: step?.id ?? call.id ?? `call-${index}`,
+				label: step?.label ?? call.tool,
+				status: call.status ?? 'finished',
+				output: call.output
+			});
+		}
+		updateActivitySummary(activity);
+		wrap.insertBefore(activity, body);
 	}
 	if (message.error) {
 		const error = document.createElement('div');
@@ -234,26 +450,6 @@ function addMessageElement(message, messageIndex = -1) {
 		actions.append(retry, test);
 		error.append(title, text, actions);
 		wrap.appendChild(error);
-	}
-	if (message.toolCalls?.length) {
-		const activity = document.createElement('details');
-		activity.className = 'tool-activity';
-		const summary = document.createElement('summary');
-		summary.textContent = `${message.toolCalls.length} action${message.toolCalls.length === 1 ? '' : 's'} completed`;
-		const content = document.createElement('div');
-		content.className = 'tool-activity-content';
-		for (const call of message.toolCalls) {
-			const row = document.createElement('div');
-			row.className = 'tool-row';
-			const name = document.createElement('strong');
-			name.textContent = call.tool;
-			const output = document.createElement('span');
-			output.textContent = String(call.output).slice(0, 280);
-			row.append(name, output);
-			content.appendChild(row);
-		}
-		activity.append(summary, content);
-		wrap.appendChild(activity);
 	}
 	messagesEl.appendChild(wrap);
 	if (wasNearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -347,7 +543,7 @@ function renderSessions() {
 			lastGroup = group;
 		}
 		const row = document.createElement('button');
-		row.className = `session-row${session.failed ? ' failed' : ''}${session.id === currentSessionId ? ' active' : ''}`;
+		row.className = `session-row${session.failed ? ' failed' : ''}${session.running ? ' running' : ''}${session.id === currentSessionId ? ' active' : ''}`;
 		row.dataset.sessionId = session.id;
 		row.title = session.title;
 		const dot = document.createElement('span');
@@ -359,7 +555,7 @@ function renderSessions() {
 		title.textContent = session.title || 'New chat';
 		const meta = document.createElement('span');
 		meta.className = 'session-meta';
-		meta.textContent = session.failed ? 'Failed' : session.id === currentSessionId ? 'Current chat' : 'Conversation';
+		meta.textContent = session.running ? 'Running · open to monitor' : session.failed ? 'Failed' : session.id === currentSessionId ? 'Current chat' : 'Conversation';
 		copy.append(title, meta);
 		const age = document.createElement('span');
 		age.className = 'session-age';
@@ -537,6 +733,8 @@ historyBtn.addEventListener('click', () => showSessions(!showingSessions));
 document.getElementById('wuchat-settings').addEventListener('click', () => post({ type: 'openSettings' }));
 document.getElementById('wuchat-cli').addEventListener('click', () => post({ type: 'openCli' }));
 document.getElementById('wuchat-browser').addEventListener('click', () => post({ type: 'openBrowser' }));
+document.getElementById('wuchat-browser-pick').addEventListener('click', () => post({ type: 'pickBrowserElement' }));
+document.getElementById('wuchat-browser-capture').addEventListener('click', () => post({ type: 'captureBrowser' }));
 document.getElementById('wuchat-approval-mode').addEventListener('change', event => post({ type: 'setApprovalMode', effort: event.target.value }));
 executionModeSelect.addEventListener('change', event => post({ type: 'setExecutionMode', effort: event.target.value }));
 sessionSearch.addEventListener('input', renderSessions);
@@ -554,6 +752,8 @@ sessionList.addEventListener('click', event => {
 });
 messagesEl.addEventListener('click', event => {
 	const target = event.target;
+	const file = target.closest('[data-file-path]');
+	if (file) { post({ type: 'openChangedFile', text: file.dataset.filePath }); return; }
 	const prompt = target.closest('[data-prompt]');
 	if (prompt) {
 		inputEl.value = prompt.dataset.prompt;
@@ -621,6 +821,7 @@ window.addEventListener('message', event => {
 				attachmentsEl.appendChild(tag);
 			}
 			renderMessages(message.messages ?? []);
+			if (!busy) setBusy(Boolean(message.running));
 			const meter = document.getElementById('wuchat-context-meter');
 			if (meter && message.contextEstimate) {
 				meter.textContent = `${message.contextEstimate.tokens.toLocaleString()} tokens · ${message.contextEstimate.messages} msg`;
@@ -629,6 +830,10 @@ window.addEventListener('message', event => {
 			if (message.transientError) addTransientError(message.transientError);
 			break;
 		}
+		case 'sessions':
+			sessions = message.sessions ?? sessions;
+			renderSessions();
+			break;
 		case 'clearError':
 			messagesEl.querySelector('.msg-transient-error')?.remove();
 			break;
@@ -669,75 +874,84 @@ window.addEventListener('message', event => {
 		case 'assistantChunk': {
 			const body = document.getElementById('wuchat-pending-text');
 			if (body) {
-				body.classList.remove('pending-indicator');
-				body.dataset.raw = (body.dataset.raw ?? '') + (message.text ?? '');
-				body.innerHTML = renderMarkdown(body.dataset.raw);
-				messagesEl.scrollTop = messagesEl.scrollHeight;
+				followResponse(() => {
+					body.classList.remove('pending-indicator');
+					body.dataset.raw = (body.dataset.raw ?? '') + (message.text ?? '');
+					body.innerHTML = renderMarkdown(body.dataset.raw);
+				});
 			}
 			break;
 		}
 		case 'assistantReasoning': {
 			const pending = document.getElementById('wuchat-pending');
 			if (pending) {
-				let details = pending.querySelector('.msg-reasoning');
-				if (!details) {
-					details = document.createElement('details');
-					details.className = 'msg-reasoning';
-					const summary = document.createElement('summary');
-					summary.textContent = 'Thinking';
-					const body = document.createElement('div');
-					body.className = 'reasoning-content';
-					details.append(summary, body);
-					pending.appendChild(details);
-				}
-				const body = details.querySelector('.reasoning-content');
-				body.dataset.raw = (body.dataset.raw ?? '') + (message.text ?? '');
-				body.innerHTML = renderMarkdown(body.dataset.raw);
+				followResponse(() => {
+					let details = pending.querySelector('.msg-reasoning');
+					if (!details) {
+						details = document.createElement('details');
+						details.className = 'msg-reasoning';
+						details.open = true;
+						const summary = document.createElement('summary');
+						summary.textContent = 'Thinking';
+						const body = document.createElement('div');
+						body.className = 'reasoning-content';
+						details.append(summary, body);
+						pending.insertBefore(details, pending.querySelector('.msg-activity, .msg-body'));
+					}
+					const body = details.querySelector('.reasoning-content');
+					body.dataset.raw = (body.dataset.raw ?? '') + (message.text ?? '');
+					body.innerHTML = renderMarkdown(body.dataset.raw);
+					const placeholder = pending.querySelector('#wuchat-pending-text.pending-indicator');
+					if (placeholder) { placeholder.textContent = ''; placeholder.classList.remove('pending-indicator'); }
+				});
 			}
 			break;
 		}
 		case 'plan': {
 			const pending = document.getElementById('wuchat-pending');
 			if (pending) {
-				let steps = pending.querySelector('.plan-steps');
-				if (!steps) {
-					steps = document.createElement('div');
-					steps.className = 'plan-steps';
-					pending.appendChild(steps);
-				}
-				steps.replaceChildren();
-				const title = document.createElement('div');
-				title.className = 'plan-title';
-				title.textContent = 'Steps';
-				steps.appendChild(title);
-				for (const step of message.steps ?? []) {
-					const row = document.createElement('div');
-					row.className = 'plan-step';
-					const dot = document.createElement('span');
-					dot.className = 'plan-dot';
-					const label = document.createElement('span');
-					label.textContent = step;
-					row.append(dot, label);
-					steps.appendChild(row);
-				}
-				messagesEl.scrollTop = messagesEl.scrollHeight;
+				followResponse(() => {
+					let activity = pending.querySelector('.msg-activity');
+					if (!activity) {
+						activity = createActivity();
+						activity.open = true;
+						pending.insertBefore(activity, pending.querySelector('.msg-body'));
+					}
+					for (const [index, step] of (message.steps ?? []).entries()) {
+						addActivityStep(activity, typeof step === 'string' ? { id: `legacy-${index}`, label: step } : step);
+					}
+					updateActivitySummary(activity);
+				});
 			}
+			break;
+		}
+		case 'todos': {
+			const pending = document.getElementById('wuchat-pending');
+			if (pending) followResponse(() => renderTodos(pending, message.todos));
 			break;
 		}
 		case 'toolCall': {
 			const pending = document.getElementById('wuchat-pending');
 			if (pending) {
-				let status = [...pending.querySelectorAll('.msg-tool')].find(el => el.dataset.tool === message.tool);
-				if (!status) {
-					status = document.createElement('div');
-					status.className = 'msg-tool';
-					status.dataset.tool = message.tool;
-					pending.appendChild(status);
-				}
-			status.dataset.status = message.status;
-				status.textContent = `${message.status === 'started' ? 'Running' : message.status === 'retrying' ? 'Retrying' : message.status === 'finished' ? 'Completed' : 'Skipped'} · ${message.tool}`;
-				const stepRow = [...(pending.querySelector('.plan-steps')?.querySelectorAll('.plan-step') ?? [])].find(row => row.textContent === message.tool || row.textContent.startsWith(message.tool + ':') || row.textContent.startsWith(message.tool + ' '));
-				if (stepRow) stepRow.classList.toggle('done', message.status === 'finished');
+				followResponse(() => {
+					let activity = pending.querySelector('.msg-activity');
+					if (!activity) {
+						activity = createActivity();
+						activity.open = true;
+						pending.insertBefore(activity, pending.querySelector('.msg-body'));
+					}
+					const legacyRows = !message.id ? [...activity.querySelectorAll('.activity-step')].filter(row => row.dataset.stepId.startsWith('legacy-')) : [];
+					const legacyStep = message.status === 'started'
+						? legacyRows.find(row => row.dataset.status === 'queued')
+						: legacyRows.find(row => ['awaiting', 'started', 'retrying'].includes(row.dataset.status)) ?? legacyRows.find(row => row.dataset.status === 'queued');
+					updateActivityStep(activity, {
+						id: message.id ?? legacyStep?.dataset.stepId ?? message.tool,
+						label: message.label ?? legacyStep?.querySelector('.activity-label')?.textContent ?? message.tool,
+						status: message.status,
+						output: message.output
+					});
+					if (message.status === 'finished' && message.change) addFileChange(pending, message.change);
+				});
 			}
 			break;
 		}

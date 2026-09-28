@@ -7,13 +7,17 @@ import {
 	Agent,
 	AgentCapabilities,
 	AgentInvocationResult,
+	AgentStep,
 	AgentStreamCallbacks,
 	ChatMessage,
 	ChatRequest,
 	CancellationToken,
+	FileChange,
 	LLMProvider,
+	TodoItem,
 	ToolCallRecord,
-	ToolCallRequest
+	ToolCallRequest,
+	ToolProgress
 } from '../common/types';
 import { ToolRegistry } from '../tools/ToolRegistry';
 
@@ -68,8 +72,8 @@ export class BaseAgent implements Agent {
 		const toolCalls: ToolCallRecord[] = [];
 		let text = '';
 		let reasoning = '';
-		let plan: string[] | undefined;
-		let planAnnounced = false;
+		const plan: AgentStep[] = [];
+		let todos: TodoItem[] | undefined;
 		const maxContextMessages = this.options.runtime?.maxContextMessages;
 		let history = await buildContext(
 			request,
@@ -80,6 +84,8 @@ export class BaseAgent implements Agent {
 		);
 		const tools = buildToolDefinitions(this.tools, this.toolRegistry, this.options.runtime?.disabledTools?.() ?? []);
 		const prompt = buildPrompt(this.systemPrompt, { ...request, tools });
+		let connectionRetries = 0;
+		let nextStreamPrompt = prompt;
 
 		for (let round = 0; round < 5; round++) {
 			if (request.token.isCancellationRequested) {
@@ -90,9 +96,11 @@ export class BaseAgent implements Agent {
 			let resumes = 0;
 			const toolRequests: ToolCallRequest[] = [];
 			let turnText = '';
+			const streamPrompt = nextStreamPrompt;
+			nextStreamPrompt = '';
 			const stream = llm.chat({
 				...request,
-				prompt: round === 0 ? prompt : '',
+				prompt: streamPrompt,
 				history,
 				tools
 			}, model);
@@ -102,6 +110,23 @@ export class BaseAgent implements Agent {
 					break;
 				}
 				if (chunk.error) {
+					if (isTransientConnectionError(chunk.error) && !request.token.isCancellationRequested) {
+						connectionRetries++;
+						const delay = Math.min(1_000 * 2 ** Math.min(connectionRetries - 1, 5), 30_000);
+						callbacks.onSystemMessage?.(`Wuchat: conexão interrompida; nova tentativa em ${Math.ceil(delay / 1_000)}s (tentativa ${connectionRetries}).`);
+						await waitForRetry(delay, request.token);
+						if (!request.token.isCancellationRequested) {
+							if (turnText.length > 0) {
+								history.push({ role: 'assistant', content: turnText });
+								history.push({ role: 'user', content: 'Continue exactly where you stopped. Do not repeat anything already written, do not add preamble.' });
+								turnText = '';
+							} else if (streamPrompt) {
+								nextStreamPrompt = streamPrompt;
+							}
+							continueRound = true;
+						}
+						break;
+					}
 					// If the stream died mid-response, try to make the model continue
 					// instead of losing the whole turn (up to MAX_STREAM_RESUMES times).
 					if (turnText.length > 0 && resumes < MAX_STREAM_RESUMES) {
@@ -113,7 +138,7 @@ export class BaseAgent implements Agent {
 						continueRound = true;
 						break;
 					}
-					return { text, reasoning: reasoning || undefined, toolCalls, error: chunk.error };
+					return { text, reasoning: reasoning || undefined, toolCalls, plan: plan.length ? plan : undefined, todos, error: chunk.error };
 				}
 				if (chunk.text) {
 					turnText += chunk.text;
@@ -127,6 +152,7 @@ export class BaseAgent implements Agent {
 				if (chunk.toolCall) {
 					toolRequests.push(chunk.toolCall);
 				}
+
 			}
 
 			if (continueRound) {
@@ -135,10 +161,9 @@ export class BaseAgent implements Agent {
 			}
 
 			// Announce the steps (tool sequence) as a checklist before running them.
-			if (!planAnnounced && toolRequests.length > 0) {
-				planAnnounced = true;
-				plan = toolRequests.map(call => describeStep(call, this.tools, this.toolRegistry));
-				callbacks.onPlan?.(plan);
+			if (toolRequests.length > 0) {
+				plan.push(...toolRequests.map(call => ({ id: call.id, label: describeStep(call, this.tools, this.toolRegistry) })));
+				callbacks.onPlan?.([...plan]);
 			}
 
 			if (request.token.isCancellationRequested || toolRequests.length === 0) {
@@ -152,26 +177,38 @@ export class BaseAgent implements Agent {
 
 			for (const call of toolRequests) {
 				const toolId = this.tools.find(id => toModelToolName(id) === call.tool);
+				const step = plan.find(item => item.id === call.id)!;
 				const rawInput = toolInputToString(call.input);
 				if (!toolId || !this.toolRegistry.get(toolId)) {
-					callbacks.onToolCall?.(call.tool, 'rejected');
 					const output = 'This tool is not allowed for the selected agent.';
-					toolCalls.push({ ...call, output });
+				callbacks.onToolCall?.({ ...step, tool: call.tool, status: 'rejected', output });
+					toolCalls.push({ ...call, output, status: 'rejected' });
 					history.push({ role: 'tool', content: output, toolCallId: call.id, toolName: call.tool });
 					continue;
 				}
 
-				callbacks.onToolCall?.(toolId, 'started');
+				const tool = this.toolRegistry.get(toolId)!;
+				const autoApprove = this.toolRegistry.isSessionAutoApproved || (this.options.runtime?.autoApproveTools?.() ?? false);
+				callbacks.onToolCall?.({ ...step, tool: toolId, status: tool.requiresApproval && !autoApprove ? 'awaiting' : 'started' });
 				let output = '';
 				let lastError: unknown;
+				let change: FileChange | undefined;
 				for (let attempt = 1; attempt <= MAX_TOOL_RETRIES; attempt++) {
 					try {
 						output = await this.toolRegistry.run(
 							toolId,
 							rawInput,
-							this.toolRegistry.isSessionAutoApproved || (this.options.runtime?.autoApproveTools?.() ?? false),
+							autoApprove,
 							request.token,
-							this.options.runtime?.confirm ?? denyConfirmation
+							async (title, detail) => {
+								const approved = await (this.options.runtime?.confirm ?? denyConfirmation)(title, detail);
+								if (approved) callbacks.onToolCall?.({ ...step, tool: toolId, status: 'started' });
+								return approved;
+							},
+							{
+								onFileChange: value => { change = value; },
+								onTodos: value => { todos = value; callbacks.onTodos?.(value); }
+							}
 						);
 						lastError = undefined;
 						break;
@@ -180,9 +217,9 @@ export class BaseAgent implements Agent {
 						const message = err instanceof Error ? err.message : String(err);
 						// Rejected approvals and cancellations are final; transient tool
 						// failures get up to MAX_TOOL_RETRIES attempts with short backoff.
-						if (message.includes('not approved') || request.token.isCancellationRequested) break;
+						if (message.includes('not approved') || message.startsWith('Wuchat:') || request.token.isCancellationRequested) break;
 						if (attempt < MAX_TOOL_RETRIES) {
-							callbacks.onToolCall?.(toolId, 'retrying');
+							callbacks.onToolCall?.({ ...step, tool: toolId, status: 'retrying', output: message });
 							await new Promise(resolve => setTimeout(resolve, Math.min(500 * 2 ** (attempt - 1), 4_000)));
 							if (request.token.isCancellationRequested) break;
 						}
@@ -191,11 +228,12 @@ export class BaseAgent implements Agent {
 				if (lastError !== undefined) {
 					output = `Error: ${lastError instanceof Error ? lastError.message : String(lastError)}`;
 				}
-				callbacks.onToolCall?.(toolId, output.includes('not approved') ? 'rejected' : 'finished');
+				const status: ToolProgress['status'] = output.includes('not approved') ? 'rejected' : lastError !== undefined ? 'failed' : 'finished';
+				callbacks.onToolCall?.({ ...step, tool: toolId, status, output: output.slice(0, 2000), ...(status === 'finished' ? { change } : {}) });
 				// Keep the full output in the working history so follow-up rounds see it;
 				// only the persisted record is truncated for storage.
 				history.push({ role: 'tool', content: output, toolCallId: call.id, toolName: toolId });
-				const record = { id: call.id, tool: toolId, input: call.input, output: output.slice(0, 2000) };
+				const record = { id: call.id, tool: toolId, input: call.input, output: output.slice(0, 2000), status, ...(status === 'finished' ? { change } : {}) };
 				toolCalls.push(record);
 			}
 		}
@@ -203,7 +241,7 @@ export class BaseAgent implements Agent {
 		if (request.token.isCancellationRequested) {
 			text += '\n\n_(generation cancelled)_';
 		}
-		return { text: text.trimEnd(), reasoning: reasoning || undefined, toolCalls, plan };
+		return { text: text.trimEnd(), reasoning: reasoning || undefined, toolCalls, plan: plan.length ? plan : undefined, todos };
 	}
 }
 
@@ -290,6 +328,22 @@ const MAX_TOOL_RETRIES = 5;
 const MAX_STREAM_RESUMES = 3;
 /** Characters that fit, very roughly, in a model context window (conservative). */
 const APPROX_CONTEXT_CHARS = 160_000;
+
+function isTransientConnectionError(message: string): boolean {
+	return /fetch failed|network|socket|econn(reset|refused|aborted)|enotfound|etimedout|timed out|connection (?:lost|closed|reset)|bridge (?:was not found|is not available)|provider response did not include a stream/i.test(message);
+}
+
+function waitForRetry(delay: number, token: ChatRequest['token']): Promise<void> {
+	return new Promise(resolve => {
+		const timer = setTimeout(finish, delay);
+		const subscription = token.onCancellationRequested(finish);
+		function finish(): void {
+			clearTimeout(timer);
+			subscription.dispose();
+			resolve();
+		}
+	});
+}
 /** Target size when compacting history so there is room for the new turn. */
 const COMPACT_TARGET_CHARS = 60_000;
 

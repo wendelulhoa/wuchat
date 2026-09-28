@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
+import { createInterface as createReadlineInterface } from 'node:readline';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { AgentCapabilities, ChatMessage, ChatRequest, CancellationToken, WuchatTool } from '../common/types';
+import { AgentCapabilities, ChatMessage, ChatRequest, CancellationToken, RequestContext, WuchatTool } from '../common/types';
 import { BaseAgent } from '../agents/Agent';
 import { ToolRegistry } from '../tools/ToolRegistry';
+import { fileChange, updateTodosTool } from '../tools/progress';
 import { resolveCliProvider, listConnectedModels } from './provider';
 import { createCliUi } from './ui';
 
@@ -19,8 +21,21 @@ const storeDir = path.join(homedir(), '.wuchat', 'sessions');
 const token: CancellationToken = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) };
 
 async function main(): Promise<void> {
+	for (const stream of [stdout, process.stderr]) {
+		stream.on('error', error => {
+			if ((error as NodeJS.ErrnoException).code !== 'EPIPE') process.exitCode = 1;
+		});
+	}
+	if (process.argv[2] === 'login') {
+		await loginCli();
+		return;
+	}
+	if (process.argv[2] === 'logout') {
+		await logoutCli();
+		return;
+	}
 	if (process.argv.includes('--help') || process.argv.includes('-h')) {
-		console.log('Wuchat CLI\n\nUsage: wuchat [sessions] [--connected] [--api] [--session ID] [--agent ask|agent] [--yes]\n\nsessions: list saved CLI sessions.\nDefault: use the authenticated provider selected in Wuchat while VS Code is active.\n--api: use a direct API-key provider selected by WUCHAT_PROVIDER.\nIn-chat commands: /model, /sessions, /history, /exit.\nRun inside tmux to keep a session alive across SSH disconnects.');
+		console.log('Wuchat CLI\n\nUsage: wuchat [login|logout|sessions] [--connected] [--session ID] [--agent ask|agent] [--yes]\n\nlogin: configure the Z.AI API key for direct CLI use, independent of VS Code.\nlogout: remove saved direct CLI credentials.\nsessions: list saved CLI sessions.\nClaude Plan and ChatGPT Codex use their VS Code sign-in provider.\nIn-chat commands: /model, /sessions, /history, /exit.\nRun inside tmux to keep a session alive across SSH disconnects.');
 		return;
 	}
 	if (process.argv[2] === 'sessions') {
@@ -47,6 +62,8 @@ async function main(): Promise<void> {
 	const autoApprove = process.argv.includes('--yes');
 	const promptIndex = process.argv.indexOf('--prompt');
 	const oneShotPrompt = promptIndex >= 0 ? process.argv[promptIndex + 1] : undefined;
+	const contextIndex = process.argv.indexOf('--context-file');
+	const requestContext = contextIndex >= 0 ? await readCliContext(process.argv[contextIndex + 1]) : { attachments: [] };
 	const registry = new ToolRegistry();
 	registerCliTools(registry);
 	const caps: AgentCapabilities = { readEditor: false, readWorkspace: true, editFiles: agentMode, runTerminal: agentMode };
@@ -55,10 +72,10 @@ async function main(): Promise<void> {
 		name: agentMode ? 'Agent' : 'Ask',
 		description: 'Wuchat CLI agent',
 		systemPrompt: agentMode
-			? 'You are Wuchat Agent, a coding assistant running in a terminal. Make focused changes using tools. Ask before destructive actions.'
+			? 'You are Wuchat Agent, a coding assistant running in a terminal. For multi-step work, publish a task list with updateTodos and update it as tasks start and complete; verify before marking tasks completed. Make focused changes using tools. If a tool fails, inspect its error, correct the input or use another tool, and continue. Ask before destructive actions.'
 			: 'You are Wuchat Ask, a concise coding assistant. Answer clearly and inspect workspace files only when useful.',
 		tools: agentMode
-			? ['wuchat.readFile', 'wuchat.listWorkspace', 'wuchat.writeFile', 'wuchat.runCommand']
+			? ['wuchat.readFile', 'wuchat.listWorkspace', 'wuchat.writeFile', 'wuchat.updateTodos', 'wuchat.runCommand']
 			: ['wuchat.readFile', 'wuchat.listWorkspace'],
 		capabilities: caps,
 		runtime: {
@@ -77,17 +94,52 @@ async function main(): Promise<void> {
 		// Stdin is not ours; keep it paused so the readline instance never holds the event loop open.
 		stdin.pause();
 		history = [...history, { role: 'user', content: oneShotPrompt }];
-		await writeSession(sessionFile, sessionId, history, provider.id, activeModel);
+		await writeSession(sessionFile, sessionId, history, provider.id, activeModel, 'running', process.pid);
 		const request: ChatRequest = {
-			requestId: randomUUID(), agent: agent.id, prompt: oneShotPrompt, history: history.slice(0, -1), context: { attachments: [] },
+			requestId: randomUUID(), agent: agent.id, prompt: oneShotPrompt, history: history.slice(0, -1), context: requestContext,
 			tools: [], token
 		};
-		const result = await agent.invoke(request, provider, activeModel, { onText: text => stdout.write(text) });
+		let streamedText = '';
+		let progressTimer: NodeJS.Timeout | undefined;
+		let persistQueue = Promise.resolve();
+		const persistProgress = () => {
+			const snapshot = [...history, { role: 'assistant' as const, content: streamedText, agent: 'CLI Agent' }];
+			persistQueue = persistQueue.then(() => writeSession(sessionFile, sessionId, snapshot, provider.id, activeModel, 'running', process.pid));
+		};
+		const flushProgress = () => {
+			if (progressTimer) clearTimeout(progressTimer);
+			progressTimer = undefined;
+			persistProgress();
+		};
+		const handleSignal = (signal: NodeJS.Signals) => {
+			flushProgress();
+			void persistQueue.then(() => writeSession(sessionFile, sessionId,
+				[...history, { role: 'assistant', content: streamedText || '_(CLI request interrupted)_', agent: 'CLI Agent', error: 'Process interrupted' }],
+				provider.id, activeModel, 'interrupted')).finally(() => process.exit(signal === 'SIGINT' ? 130 : 143));
+		};
+		process.once('SIGTERM', handleSignal);
+		process.once('SIGINT', handleSignal);
+		const result = await agent.invoke(request, provider, activeModel, {
+			onText: text => {
+				stdout.write(text);
+				streamedText += text;
+				if (!progressTimer) progressTimer = setTimeout(flushProgress, 500);
+			},
+			onReasoning: text => emitCliEvent({ type: 'assistantReasoning', text }),
+			onToolCall: progress => emitCliEvent({ type: 'toolCall', ...progress }),
+			onPlan: steps => emitCliEvent({ type: 'plan', steps }),
+			onTodos: todos => emitCliEvent({ type: 'todos', todos }),
+			onSystemMessage: text => emitCliEvent({ type: 'system', text })
+		});
+		flushProgress();
+		await persistQueue;
+		process.off('SIGTERM', handleSignal);
+		process.off('SIGINT', handleSignal);
 		history = [
 			...history,
-			{ role: 'assistant', content: result.text, toolCalls: result.toolCalls }
+			{ role: 'assistant', content: result.text, toolCalls: result.toolCalls, plan: result.plan, todos: result.todos, reasoning: result.reasoning }
 		];
-		await writeSession(sessionFile, sessionId, history, provider.id, activeModel);
+		await writeSession(sessionFile, sessionId, history, provider.id, activeModel, result.error ? 'failed' : 'completed');
 		stdout.write('');
 		process.exit(result.error ? 1 : 0);
 	}
@@ -116,7 +168,7 @@ async function main(): Promise<void> {
 			const spinner = ui.spinner(`${provider.name} · ${activeModel || 'auto'}`);
 			const result = await agent.invoke(request, provider, activeModel, {
 				onText: text => { spinner.stop(); stdout.write(text); },
-				onToolCall: (_tool, status) => { if (status === 'started') spinner.stop(); else if (status === 'finished') spinner.start(); },
+				onToolCall: ({ status }) => { if (status === 'started') spinner.stop(); else if (status === 'finished' || status === 'failed' || status === 'rejected') spinner.start(); },
 				onSystemMessage: text => { spinner.stop(); console.log(ui.dim(text)); spinner.start(); }
 			});
 			spinner.stop();
@@ -126,7 +178,7 @@ async function main(): Promise<void> {
 			history = [
 				...history,
 				{ role: 'user', content: prompt },
-				{ role: 'assistant', content: result.text, toolCalls: result.toolCalls }
+				{ role: 'assistant', content: result.text, toolCalls: result.toolCalls, plan: result.plan, todos: result.todos, reasoning: result.reasoning }
 			];
 			await writeFile(sessionFile, JSON.stringify({ id: sessionId, workspace: root, updatedAt: new Date().toISOString(), provider: provider.id, model: activeModel, messages: history }, null, 2), { mode: 0o600 });
 		}
@@ -135,8 +187,106 @@ async function main(): Promise<void> {
 	}
 }
 
-async function writeSession(file: string, id: string, messages: ChatMessage[], provider: string, model: string): Promise<void> {
-	await writeFile(file, JSON.stringify({ id, workspace: root, updatedAt: new Date().toISOString(), provider, model, messages }, null, 2), { mode: 0o600 });
+async function loginCli(): Promise<void> {
+	console.log('Direct CLI login for Z.AI (independent of VS Code):');
+	const apiKey = await readSecret('ZAI_API_KEY: ');
+	if (!apiKey.trim()) throw new Error('API key cannot be empty.');
+	const defaultModel = 'glm-4.7';
+	const modelPrompt = createInterface({ input: stdin, output: stdout });
+	const model = (await modelPrompt.question(`Model [${defaultModel}]: `)).trim() || defaultModel;
+	modelPrompt.close();
+	const directory = path.join(homedir(), '.wuchat');
+	const configFile = path.join(directory, 'config.json');
+	await mkdir(directory, { recursive: true, mode: 0o700 });
+	await writeFile(configFile, JSON.stringify({ provider: 'zai', apiKey: apiKey.trim(), model }, null, 2), { mode: 0o600 });
+	await chmod(configFile, 0o600);
+	console.log(`Saved Z.AI CLI credentials in ${configFile}`);
+}
+
+async function logoutCli(): Promise<void> {
+	await rm(path.join(homedir(), '.wuchat', 'config.json'), { force: true });
+	console.log('Removed saved direct CLI credentials.');
+}
+
+async function readSecret(label: string): Promise<string> {
+	if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') {
+		throw new Error('Login requires an interactive terminal so the API key can be entered securely.');
+	}
+	stdout.write(label);
+	stdin.setRawMode(true);
+	stdin.resume();
+	return new Promise((resolve, reject) => {
+		let value = '';
+		const cleanup = () => {
+			stdin.setRawMode(false);
+			stdin.off('data', onData);
+		};
+		const onData = (chunk: Buffer) => {
+			for (const character of chunk.toString()) {
+				if (character === '\u0003') {
+					cleanup();
+					stdout.write('\n');
+					reject(new Error('Login cancelled.'));
+					return;
+				}
+				if (character === '\r' || character === '\n') {
+					cleanup();
+					stdout.write('\n');
+					resolve(value);
+					return;
+				}
+				if (character === '\u007f' || character === '\b') {
+					if (value.length) {
+						value = value.slice(0, -1);
+						stdout.write('\b \b');
+					}
+					continue;
+				}
+				value += character;
+				stdout.write('*');
+			}
+		};
+		stdin.on('data', onData);
+	});
+}
+
+async function readCliContext(file: string | undefined): Promise<RequestContext> {
+	if (!file) throw new Error('--context-file requires a path.');
+	try {
+		const parsed = JSON.parse(await readFile(file, 'utf8')) as {
+			selection?: RequestContext['selection']; notes?: string;
+			attachments?: Array<{ name: string; uri: string; mimeType: string; text?: string; data?: string }>;
+		};
+		return {
+			...(parsed.selection ? { selection: parsed.selection } : {}),
+			...(parsed.notes ? { notes: parsed.notes } : {}),
+			attachments: (parsed.attachments ?? []).map(attachment => ({
+				name: attachment.name,
+				uri: attachment.uri,
+				mimeType: attachment.mimeType,
+				text: attachment.text,
+				data: Buffer.from(attachment.data ?? '', 'base64')
+			}))
+		};
+	} finally {
+		await rm(file, { force: true });
+	}
+}
+
+function emitCliEvent(event: Record<string, unknown>): void {
+	process.stderr.write(`\x1eWUCHAT:${JSON.stringify(event)}\n`);
+}
+
+async function writeSession(
+	file: string,
+	id: string,
+	messages: ChatMessage[],
+	provider: string,
+	model: string,
+	status: 'running' | 'completed' | 'failed',
+	pid?: number
+): Promise<void> {
+	await writeFile(file, JSON.stringify({ id, workspace: root, updatedAt: new Date().toISOString(), provider, model, status, pid, messages }, null, 2), { mode: 0o600 });
 }
 
 /** Interactive model picker; `preselected` switches without listing. */
@@ -251,12 +401,21 @@ function registerCliTools(registry: ToolRegistry): void {
 		{
 			id: 'wuchat.writeFile', name: 'Write File', description: 'Creates or overwrites a workspace file. Requires approval.', requiresApproval: true,
 			inputSchema: 'first line: relative file path; remaining lines: file content',
-			async invoke(raw) {
+			async invoke(raw, ctx) {
 				const split = raw.indexOf('\n');
 				if (split < 0) throw new Error('Provide a relative path on the first line and content afterwards.');
 				const file = resolveWorkspacePath(raw.slice(0, split).trim());
+				const content = raw.slice(split + 1);
+				let before = '';
+				let created = false;
+				try { before = await readFile(file, 'utf8'); }
+				catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+					created = true;
+				}
 				await mkdir(path.dirname(file), { recursive: true });
-				await writeFile(file, raw.slice(split + 1));
+				await writeFile(file, content);
+				if (created || before !== content) ctx.onFileChange?.(fileChange(path.relative(root, file), before, content, created));
 				return `Wrote ${path.relative(root, file)}.`;
 			}
 		},
@@ -269,7 +428,7 @@ function registerCliTools(registry: ToolRegistry): void {
 			}
 		}
 	];
-	for (const tool of tools) registry.register(tool);
+	for (const tool of [...tools, updateTodosTool]) registry.register(tool);
 }
 
 main().catch(error => {

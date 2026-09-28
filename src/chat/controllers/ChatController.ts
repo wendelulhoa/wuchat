@@ -6,7 +6,7 @@
 import * as vscode from 'vscode';
 import { AgentManager } from '../../agents/AgentManager';
 import { Logger } from '../../common/logger';
-import { ChatMessage, ChatRequest, LLMProvider, RequestContext } from '../../common/types';
+import { AgentStep, ChatMessage, ChatRequest, LLMProvider, RequestContext, TodoItem, ToolProgress } from '../../common/types';
 import { ProviderRegistry } from '../../llm/ProviderRegistry';
 import { ChatSession } from '../sessions/ChatSession';
 import { SessionStore } from '../history/SessionStore';
@@ -16,8 +16,9 @@ export interface StreamCallbacks {
 	onAssistantStart?(agentName: string): void;
 	onChunk?(text: string): void;
 	onReasoning?(text: string): void;
-	onToolCall?(tool: string, status: 'started' | 'finished' | 'rejected' | 'retrying'): void;
-	onPlan?(steps: string[]): void;
+	onToolCall?(progress: ToolProgress): void;
+	onPlan?(steps: AgentStep[]): void;
+	onTodos?(todos: TodoItem[]): void;
 	onAssistantDone?(message: ChatMessage): void;
 	onSystemMessage?(text: string): void;
 	onError?(text: string): void;
@@ -40,12 +41,14 @@ export class ChatController {
 		return this._session;
 	}
 
-	get sessionSummaries(): Array<{ id: string; title: string; updatedAt: number; failed: boolean }> {
+	get sessionSummaries(): Array<{ id: string; title: string; updatedAt: number; failed: boolean; running?: boolean; processId?: number }> {
 		return this.sessionStore.sessions.map(session => ({
 			id: session.id,
 			title: session.title,
 			updatedAt: session.updatedAt,
-			failed: Boolean(session.messages.at(-1)?.error)
+			failed: Boolean(session.messages.at(-1)?.error),
+			running: session.running,
+			processId: session.processId
 		}));
 	}
 
@@ -80,6 +83,10 @@ export class ChatController {
 	/** Persists a session (used by forks before switching to them). */
 	async saveSession(session: ChatSession): Promise<void> {
 		await this.sessionStore.save(session.toStored());
+	}
+
+	async reconcileRunningSessions(): Promise<void> {
+		await this.sessionStore.reconcileRunning();
 	}
 
 	async deleteSession(id: string): Promise<void> {
@@ -148,8 +155,9 @@ export class ChatController {
 			const result = await agent.invoke(request, provider, modelId, {
 				onText: text => callbacks.onChunk?.(text),
 				onReasoning: text => callbacks.onReasoning?.(text),
-				onToolCall: (tool, status) => callbacks.onToolCall?.(tool, status),
+				onToolCall: progress => callbacks.onToolCall?.(progress),
 				onPlan: steps => callbacks.onPlan?.(steps),
+				onTodos: todos => callbacks.onTodos?.(todos),
 				onSystemMessage: text => callbacks.onSystemMessage?.(text)
 			});
 			const assistantMessage: ChatMessage = {
@@ -157,6 +165,8 @@ export class ChatController {
 				content: result.text,
 				error: result.error,
 				reasoning: result.reasoning,
+				plan: result.plan,
+				todos: result.todos,
 				agent: agent.name,
 				provider: provider.id,
 				toolCalls: result.toolCalls.length ? result.toolCalls : undefined

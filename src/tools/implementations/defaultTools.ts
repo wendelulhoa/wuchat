@@ -9,12 +9,14 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { WuchatTool } from '../../common/types';
+import { fileChange, updateTodosTool } from '../progress';
 import {
 	listWorkspaceTree,
 	openWorkspaceFile,
 	readWorkspaceFile,
 	runTerminalCommand,
-	writeWorkspaceFile
+	writeWorkspaceFile,
+	resolveWorkspacePath
 } from '../../vscode/workspaceBridge';
 
 function firstLine(rawInput: string): string {
@@ -38,15 +40,26 @@ const writeFileTool: WuchatTool = {
 	description: 'Creates or overwrites a workspace file with the provided content. Requires approval.',
 	requiresApproval: true,
 	inputSchema: 'first line: file path; remaining lines: file content',
-	async invoke(rawInput: string) {
-		const trimmed = rawInput.trim();
-		const newlineIndex = trimmed.indexOf('\n');
+	async invoke(rawInput: string, ctx) {
+		const newlineIndex = rawInput.indexOf('\n');
 		if (newlineIndex < 0) {
 			throw new Error('Wuchat: provide the file path on the first line and the content afterwards.');
 		}
-		const path = trimmed.slice(0, newlineIndex).trim();
-		const content = trimmed.slice(newlineIndex + 1);
-		return writeWorkspaceFile(path, content);
+		const path = rawInput.slice(0, newlineIndex).trim();
+		const content = rawInput.slice(newlineIndex + 1);
+		const root = vscode.workspace.workspaceFolders?.[0];
+		if (!root) throw new Error('Wuchat: no workspace folder is open.');
+		let before = '';
+		let created = false;
+		try {
+			before = new TextDecoder().decode(await vscode.workspace.fs.readFile(resolveWorkspacePath(root, path)));
+		} catch (error) {
+			if (!(error instanceof vscode.FileSystemError) || error.code !== 'FileNotFound') throw error;
+			created = true;
+		}
+		const result = await writeWorkspaceFile(path, content);
+		if (created || before !== content) ctx.onFileChange?.(fileChange(path, before, content, created));
+		return result;
 	}
 };
 
@@ -71,11 +84,11 @@ const openFileTool: WuchatTool = {
 const runCommandTool: WuchatTool = {
 	id: 'wuchat.runCommand',
 	name: 'Run Terminal Command',
-	description: 'Sends a command to the Wuchat terminal. Requires approval.',
-	requiresApproval: true,
+	description: 'Runs a command in the dedicated Wuchat integrated terminal. Destructive commands require confirmation.',
+	requiresApproval: false,
 	inputSchema: 'the command line to run',
-	async invoke(rawInput: string) {
-		return runTerminalCommand(rawInput.trim());
+	async invoke(rawInput: string, ctx) {
+		return runTerminalCommand(rawInput.trim(), ctx.confirm);
 	}
 };
 
@@ -93,28 +106,33 @@ const listWorkspaceTool: WuchatTool = {
 const applyEditTool: WuchatTool = {
 	id: 'wuchat.applyEdit',
 	name: 'Apply Edit',
-	description: 'Applies a text edit to an open editor at a given line range. Requires approval.',
+	description: 'Applies a text edit to a workspace file at a given line range, even if it is not open. Requires approval.',
 	requiresApproval: true,
 	inputSchema: 'first line: "<file> <startLine> <endLine>"; remaining lines: replacement text',
-	async invoke(rawInput: string) {
-		const trimmed = rawInput.trim();
-		const newlineIndex = trimmed.indexOf('\n');
+	async invoke(rawInput: string, ctx) {
+		const newlineIndex = rawInput.indexOf('\n');
 		if (newlineIndex < 0) {
 			throw new Error('Wuchat: expected "<file> <startLine> <endLine>" on the first line.');
 		}
-		const header = trimmed.slice(0, newlineIndex).split(/\s+/);
-		const replacement = trimmed.slice(newlineIndex + 1);
-		const editor = vscode.window.activeTextEditor;
-		if (!editor) {
-			throw new Error('Wuchat: no active text editor.');
+		const header = /^(.*?)\s+(\d+)\s+(\d+)$/.exec(rawInput.slice(0, newlineIndex).trim());
+		if (!header) throw new Error('Wuchat: expected "<file> <startLine> <endLine>" on the first line.');
+		const replacement = rawInput.slice(newlineIndex + 1);
+		const root = vscode.workspace.workspaceFolders?.[0];
+		if (!root) throw new Error('Wuchat: no workspace folder is open.');
+		const uri = resolveWorkspacePath(root, header[1]);
+		const document = await vscode.workspace.openTextDocument(uri);
+		const startLine = Number(header[2]) - 1;
+		const endLine = Number(header[3]) - 1;
+		if (!Number.isSafeInteger(startLine) || !Number.isSafeInteger(endLine) || startLine < 0 || endLine < startLine || endLine >= document.lineCount) {
+			throw new Error(`Wuchat: invalid line range for ${header[1]} (${document.lineCount} lines).`);
 		}
-		const startLine = Math.max(0, Number.parseInt(header[1] ?? '1', 10) - 1);
-		const endLine = Math.max(startLine, Number.parseInt(header[2] ?? header[1] ?? '1', 10) - 1);
-		const range = new vscode.Range(startLine, 0, endLine, editor.document.lineAt(Math.min(endLine, editor.document.lineCount - 1)).text.length);
+		const range = new vscode.Range(startLine, 0, endLine, document.lineAt(endLine).text.length);
+		const before = document.getText(range);
 		const edit = new vscode.WorkspaceEdit();
-		edit.replace(editor.document.uri, range, replacement);
-		await vscode.workspace.applyEdit(edit);
-		return `Applied edit to lines ${startLine + 1}-${endLine + 1}.`;
+		edit.replace(uri, range, replacement);
+		if (!await vscode.workspace.applyEdit(edit)) throw new Error(`Wuchat: could not apply edit to ${header[1]}.`);
+		if (before !== replacement) ctx.onFileChange?.(fileChange(header[1], before, replacement));
+		return `Applied edit to ${header[1]} lines ${startLine + 1}-${endLine + 1}.`;
 	}
 };
 
@@ -177,6 +195,7 @@ const runPlaywrightTool: WuchatTool = {
 export const defaultTools: WuchatTool[] = [
 	readFileTool,
 	writeFileTool,
+	updateTodosTool,
 	openFileTool,
 	runCommandTool,
 	listWorkspaceTool,

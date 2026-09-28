@@ -5,6 +5,33 @@
 
 export type ChatRole = 'system' | 'user' | 'assistant' | 'tool';
 
+export interface TodoItem {
+	id: string;
+	title: string;
+	status: 'not-started' | 'in-progress' | 'completed';
+}
+
+export interface FileChange {
+	path: string;
+	before: string;
+	after: string;
+	added: number;
+	removed: number;
+	created?: boolean;
+}
+
+export interface AgentStep {
+	id: string;
+	label: string;
+}
+
+export interface ToolProgress extends AgentStep {
+	tool: string;
+	status: 'awaiting' | 'started' | 'finished' | 'failed' | 'rejected' | 'retrying';
+	output?: string;
+	change?: FileChange;
+}
+
 export interface ChatMessage {
 	/** Metadata for files or browser context sent with this message; file contents are never stored here. */
 	attachments?: Array<{ name: string; mimeType: string; uri?: string }>;
@@ -23,6 +50,10 @@ export interface ChatMessage {
 	toolName?: string;
 	/** Provider-supplied reasoning summary, when available. */
 	reasoning?: string;
+	/** Announced steps, retained with the answer for the activity view. */
+	plan?: AgentStep[];
+	/** Agent-managed task checklist for this response. */
+	todos?: TodoItem[];
 	/** Request error retained in session history for diagnostics. */
 	error?: string;
 }
@@ -35,6 +66,8 @@ export interface ToolCallRequest {
 
 export interface ToolCallRecord extends ToolCallRequest {
 	output: string;
+	status?: ToolProgress['status'];
+	change?: FileChange;
 }
 
 export interface ChatRequest {
@@ -136,7 +169,8 @@ export interface AgentInvocationResult {
 	/** Tool calls executed during the invocation. */
 	toolCalls: ToolCallRecord[];
 	/** Steps the agent announced it would take (shown as a checklist). */
-	plan?: string[];
+	plan?: AgentStep[];
+	todos?: TodoItem[];
 	/** Error message, if the invocation failed. */
 	error?: string;
 }
@@ -144,9 +178,10 @@ export interface AgentInvocationResult {
 export interface AgentStreamCallbacks {
 	onText?(text: string): void;
 	onReasoning?(text: string): void;
-	onToolCall?(tool: string, status: 'started' | 'finished' | 'rejected' | 'retrying'): void;
+	onToolCall?(progress: ToolProgress): void;
 	/** Steps the agent announced (called once per plan announcement). */
-	onPlan?(steps: string[]): void;
+	onPlan?(steps: AgentStep[]): void;
+	onTodos?(todos: TodoItem[]): void;
 	/** Progress notes (context compaction, stream resumes, retries). */
 	onSystemMessage?(text: string): void;
 }
@@ -187,6 +222,8 @@ export interface WuchatToolInvocationContext {
 	token: CancellationToken;
 	/** Ask the user to confirm a sensitive action. Resolves true when approved. */
 	confirm(title: string, detail: string): Promise<boolean>;
+	onFileChange?(change: FileChange): void;
+	onTodos?(todos: TodoItem[]): void;
 }
 
 /** A tool an agent can call (read/edit files, run commands, ...). */

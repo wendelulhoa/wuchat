@@ -2,7 +2,7 @@
 	"name": "wuchat",
 	"displayName": "Wuchat",
 	"description": "Independent AI chat for VS Code — pluggable LLM providers, agents and tools, with its own Activity Bar area.",
-	"version": "0.2.35",
+	"version": "0.2.48",
 	"publisher": "wuchat",
 	"license": "MIT",
 	"icon": "media/icon.png",
@@ -27,6 +27,9 @@
 		"url": "https://github.com/wuchat/wuchat"
 	},
 	"main": "./dist/extension.js",
+	"extensionKind": [
+		"ui"
+	],
 	"bin": {
 		"wuchat": "./dist/wuchat.cjs"
 	},
@@ -141,6 +144,18 @@
 				"command": "wuchat.openSession",
 				"title": "Wuchat: Open Session",
 				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.pickBrowserElement",
+				"title": "Select Element for Wuchat",
+				"category": "Wuchat",
+				"icon": "$(inspect)"
+			},
+			{
+				"command": "wuchat.captureBrowser",
+				"title": "Attach Browser Screenshot to Wuchat",
+				"category": "Wuchat",
+				"icon": "$(camera)"
 			},
 			{
 				"command": "wuchat.deleteSession",

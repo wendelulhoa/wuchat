@@ -10,7 +10,7 @@ import { BaseAgent } from './Agent';
 
 const readWorkspaceCaps: AgentCapabilities = { readEditor: true, readWorkspace: true, editFiles: false, runTerminal: false };
 const fullCaps: AgentCapabilities = { readEditor: true, readWorkspace: true, editFiles: true, runTerminal: true };
-const allTools = ['wuchat.readFile', 'wuchat.writeFile', 'wuchat.openFile', 'wuchat.runCommand', 'wuchat.listWorkspace', 'wuchat.applyEdit', 'wuchat.runPlaywright', 'wuchat.browser'];
+const allTools = ['wuchat.readFile', 'wuchat.writeFile', 'wuchat.openFile', 'wuchat.runCommand', 'wuchat.listWorkspace', 'wuchat.applyEdit', 'wuchat.updateTodos', 'wuchat.runPlaywright', 'wuchat.browser'];
 
 export class AgentManager {
 	private readonly agents = new Map<string, Agent>();
@@ -45,7 +45,7 @@ export class AgentManager {
 			id: 'wuchat.agent',
 			name: 'Agent',
 			description: 'Coding agent that reads and edits files or runs commands with approval.',
-			systemPrompt: 'You are Wuchat Agent, an autonomous coding agent inside VS Code. Plan briefly, then use the supplied structured tools directly when needed. Prefer minimal, focused changes.',
+			systemPrompt: 'You are Wuchat Agent, an autonomous coding agent inside VS Code. For multi-step work, use updateTodos to show a short task list, update it as tasks start and complete, and verify before marking a task completed. Use the supplied structured tools directly when needed. Prefer minimal, focused changes. If a tool fails, inspect its error, correct the input or use another tool, and continue the task.',
 			tools: [...new Set([...allTools, ...customTools()])],
 			capabilities: fullCaps,
 			runtime: extensionAgentRuntime

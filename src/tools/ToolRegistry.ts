@@ -47,10 +47,11 @@ export class ToolRegistry {
 		rawInput: string,
 		autoApprove: boolean,
 		token: CancellationToken,
-		confirm: (title: string, detail: string) => Promise<boolean>
+		confirm: (title: string, detail: string) => Promise<boolean>,
+		events?: Pick<WuchatToolInvocationContext, 'onFileChange' | 'onTodos'>
 	): Promise<string> {
 		const tool = this.getRequired(id);
-		const ctx: WuchatToolInvocationContext = { token, confirm };
+		const ctx: WuchatToolInvocationContext = { token, confirm, ...events };
 		if (tool.requiresApproval && !autoApprove) {
 			const approved = await confirm(`Wuchat: allow "${tool.name}"?`, tool.description);
 			if (!approved) {
