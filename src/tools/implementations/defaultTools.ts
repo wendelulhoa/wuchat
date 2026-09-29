@@ -26,11 +26,30 @@ function firstLine(rawInput: string): string {
 const readFileTool: WuchatTool = {
 	id: 'wuchat.readFile',
 	name: 'Read File',
-	description: 'Reads a text file from the workspace.',
+	description: 'Reads a text file. Input: file path, optionally "path <startLine> <endLine>" (1-based, inclusive) or just "path" for the whole file. Very large outputs are truncated (head + tail) — read a line range for the middle.',
 	requiresApproval: false,
-	inputSchema: 'relative file path, e.g. "src/index.ts"',
+	inputSchema: 'file path, optionally followed by <startLine> <endLine>',
 	async invoke(rawInput: string) {
-		return readWorkspaceFile(firstLine(rawInput));
+		const parts = firstLine(rawInput).trim().split(/\s+/);
+		const content = await readWorkspaceFile(parts[0] ?? '');
+		if (parts.length >= 3) {
+			const start = Math.max(1, Number.parseInt(parts[1] ?? '1', 10) || 1);
+			const end = Number.parseInt(parts[2] ?? '', 10);
+			const lines = content.split('\n');
+			const slice = lines.slice(start - 1, Number.isSafeInteger(end) && end > 0 ? end : start + 399);
+			return `Lines ${start}-${start + slice.length - 1} of ${lines.length}:\n${slice.join('\n')}`;
+		}
+		// Kilo Code-style truncation: keep head and tail, mark the omitted middle.
+		const maxChars = 60_000;
+		if (content.length <= maxChars) {
+			return `${content.split('\n').length} lines:\n${content}`;
+		}
+		const half = Math.floor(maxChars / 2);
+		const head = content.slice(0, half);
+		const tail = content.slice(-half);
+		const headLines = head.split('\n').length;
+		const omitted = content.length - head.length - tail.length;
+		return `[File truncated: showing first ~${headLines} lines and the last ${half} characters; ${omitted} characters omitted. Re-read with "<path> <startLine> <endLine>" for a specific section.]\n${head}\n\n[... ${omitted} characters omitted ...]\n\n${tail}`;
 	}
 };
 
@@ -88,7 +107,7 @@ const runCommandTool: WuchatTool = {
 	requiresApproval: false,
 	inputSchema: 'the command line to run',
 	async invoke(rawInput: string, ctx) {
-		return runTerminalCommand(rawInput.trim(), ctx.confirm, ctx.token);
+		return runTerminalCommand(rawInput.trim(), ctx.confirm, ctx.token, ctx.onOutput);
 	}
 };
 

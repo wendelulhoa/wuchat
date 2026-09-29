@@ -61,7 +61,8 @@ export function getActiveSelection(): { uri: string; text: string; language: str
 export async function runTerminalCommand(
 	command: string,
 	confirm: (title: string, detail: string) => Promise<boolean>,
-	token?: CancellationToken
+	token?: CancellationToken,
+	onOutput?: (delta: string) => void
 ): Promise<string> {
 	if (!command) {
 		throw new Error('Wuchat: terminal command cannot be empty.');
@@ -81,15 +82,22 @@ export async function runTerminalCommand(
 	if (!shellIntegration) {
 		if (root && root.uri.scheme !== 'file') throw new Error('Wuchat: shell integration is required to run commands in a remote workspace.');
 		// Fallback for terminals without shell integration: capture output from a hidden process.
-		return runCapturedCommand(command, root?.uri.fsPath ?? process.cwd(), token);
+		return runCapturedCommand(command, root?.uri.fsPath ?? process.cwd(), token, onOutput);
+	}
+	// Anchor every command at the workspace root so relative paths (grep, ls…)
+	// behave like Kilo Code's shell integration, which prefixes `cd <cwd> &&`.
+	const cwd = root?.uri.fsPath;
+	if (cwd) {
+		void shellIntegration.executeCommand(`cd "${cwd}"`);
+		// Give the cd a moment; execution identity tracking starts below.
+		await new Promise(resolve => setTimeout(resolve, 120));
 	}
 	let execution: vscode.TerminalShellExecution | undefined;
 	let exitCode: number | undefined;
 	let closed = false;
-	let finish: (code: number | undefined) => void = () => {};
-	const ended = new Promise<void>(resolve => {
-		finish = code => { exitCode = code; resolve(); };
-	});
+	const finish = (code: number | undefined) => {
+		exitCode = code;
+	};
 	const endSubscription = vscode.window.onDidEndTerminalShellExecution(event => {
 		if (event.execution === execution) finish(event.exitCode);
 	});
@@ -108,12 +116,24 @@ export async function runTerminalCommand(
 				output = (output + chunk).slice(-24_000);
 			}
 		})();
-		// The execution stream is authoritative: wait for it instead of the end
-		// event so the full output is collected before reporting the result.
-		await Promise.race([readOutput, ended.then(() => undefined)]);
-		if (closed) return formatCommandResult(exitCode, output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').trim(), truncated);
-		await readOutput.catch(() => undefined);
+		// Never wait forever: long-running commands (grep in big trees, servers)
+		// return the collected output after the timeout instead of blocking the
+		// agent (Kilo Code-style command timeout).
+		const timeoutMs = Math.max(10, vscode.workspace.getConfiguration('wuchat').get<number>('commandTimeoutSeconds', 90)) * 1_000;
+		let timedOut = false;
+		await Promise.race([
+			readOutput.catch(() => undefined),
+			new Promise<void>(resolve => setTimeout(() => { timedOut = true; resolve(); }, timeoutMs))
+		]);
 		const cleanedOutput = output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').trim();
+		if (timedOut && !closed) {
+			return [
+				`Command still running after ${Math.round(timeoutMs / 1_000)}s (output collected so far, exit status unknown).`,
+				cleanedOutput || '(no output yet)',
+				truncated ? '[Output truncated]' : '',
+				'Use "Open terminal" to interact with it, or run a narrower command.'
+			].filter(Boolean).join('\n');
+		}
 		return formatCommandResult(exitCode, cleanedOutput, truncated);
 	} finally {
 		endSubscription.dispose();
@@ -142,7 +162,7 @@ export function showWuchatTerminal(): vscode.Terminal {
 	return terminal;
 }
 
-function runCapturedCommand(command: string, cwd: string, token?: CancellationToken): Promise<string> {
+function runCapturedCommand(command: string, cwd: string, token?: CancellationToken, onOutput?: (delta: string) => void): Promise<string> {
 	return new Promise((resolve, reject) => {
 		if (token?.isCancellationRequested) { reject(new Error('Wuchat: command cancelled.')); return; }
 		const child = spawn(command, { cwd, shell: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -152,6 +172,7 @@ function runCapturedCommand(command: string, cwd: string, token?: CancellationTo
 			const text = chunk.toString();
 			if (output.length + text.length > 24_000) truncated = true;
 			output = (output + text).slice(-24_000);
+			onOutput?.(text);
 		};
 		child.stdout.on('data', collect);
 		child.stderr.on('data', collect);

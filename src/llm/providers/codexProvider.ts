@@ -142,7 +142,7 @@ async function* streamCodex(request: ChatRequest, model: string, token: string, 
 		throw new Error(`Codex API ${response.status}: ${await response.text().catch(() => response.statusText)}`);
 	}
 	const calls = new Map<string, { id: string; name: string; arguments: string }>();
-	for await (const data of readSse(response)) {
+	for await (const data of readSse(response, request.token)) {
 		const event = JSON.parse(data) as {
 			type?: string;
 			item?: { id?: string; call_id?: string; name?: string; arguments?: string };
@@ -167,6 +167,9 @@ async function* streamCodex(request: ChatRequest, model: string, token: string, 
 			yield { text: event.delta };
 		} else if (event.type === 'response.reasoning_summary_text.delta' && event.delta) {
 			yield { reasoning: event.delta };
+		} else if (event.type === 'response.reasoning_summary_text.done' || event.type === 'response.reasoning_text.done') {
+			// Each reasoning summary part becomes one step in the UI.
+			yield { reasoningBoundary: true };
 		}
 	}
 	for (const call of calls.values()) {

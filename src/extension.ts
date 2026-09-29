@@ -120,6 +120,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	for (const tool of defaultTools) {
 		toolRegistry.register(tool);
 	}
+	// Granular per-tool approval (Kilo Code-style): allow/ask per tool id or wildcard.
+	const applyApprovalPolicy = (): void => {
+		toolRegistry.setApprovalPolicy(vscode.workspace.getConfiguration('wuchat').get<Record<string, string>>('tools.approval', {}));
+	};
+	applyApprovalPolicy();
 
 	toolRegistry.register(createBrowserTool(browser));
 	context.subscriptions.push(registerMcpTools(toolRegistry, logger));
@@ -127,7 +132,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	const sessionStore = new SessionStore(context);
 	const controller = new ChatController(agentManager, providerRegistry, sessionStore, logger);
 	const chatView = new WuchatChatView(context.extensionUri, controller, agentManager, providerRegistry, logger, browser, toolRegistry);
-	browser.setContextHandlers((description, screenshot, url) => chatView.addBrowserElement(description, screenshot, url), (data, url) => chatView.addBrowserScreenshot(data, url));
+	browser.setContextHandlers((description, screenshot, url) => chatView.addBrowserElement(description, screenshot, url), (data, url) => chatView.addBrowserScreenshot(data, url), picking => chatView.updateBrowserPickState(picking));
 	void agentManager.refreshWorkspaceAgents().then(() => chatView.refresh());
 
 	context.subscriptions.push(
@@ -154,7 +159,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	refreshAgentWatchers();
 	context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
 		refreshAgentWatchers();
-		browser.setContextHandlers((description, screenshot, url) => chatView.addBrowserElement(description, screenshot, url), (data, url) => chatView.addBrowserScreenshot(data, url));
+		browser.setContextHandlers((description, screenshot, url) => chatView.addBrowserElement(description, screenshot, url), (data, url) => chatView.addBrowserScreenshot(data, url), picking => chatView.updateBrowserPickState(picking));
 	void agentManager.refreshWorkspaceAgents().then(() => chatView.refresh());
 	}));
 
@@ -170,6 +175,9 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(...registerVsCodeChatBridge(controller, agentManager, logger, () => { void chatView.refresh(); }));
 
 	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+		if (event.affectsConfiguration('wuchat.tools.approval')) {
+			applyApprovalPolicy();
+		}
 		if (event.affectsConfiguration('wuchat.')) {
 			void chatView.refresh();
 		}

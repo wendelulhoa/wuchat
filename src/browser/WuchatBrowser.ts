@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { chromium, Browser, BrowserContext, Page } from 'playwright-core';
+import { chromium, Browser, BrowserContext, CDPSession, Page } from 'playwright-core';
 
 const CHROME_PATHS = [
 	process.env.CHROME_PATH,
@@ -18,16 +18,22 @@ export class WuchatBrowser implements vscode.Disposable {
 	private context?: BrowserContext;
 	private page?: Page;
 	private pagePromise?: Promise<Page>;
+	private pickAbort?: AbortController;
 	private disposed = false;
 	private onElement?: (description: string, screenshot: Uint8Array, url: string) => Promise<void>;
 	private onScreenshot?: (data: Uint8Array, url: string) => Promise<void>;
+	private onPickStateChange?: (picking: boolean) => void;
+
+	get isPicking(): boolean { return !!this.pickAbort; }
 
 	setContextHandlers(
 		onElement: (description: string, screenshot: Uint8Array, url: string) => Promise<void>,
-		onScreenshot: (data: Uint8Array, url: string) => Promise<void>
+		onScreenshot: (data: Uint8Array, url: string) => Promise<void>,
+		onPickStateChange?: (picking: boolean) => void
 	): void {
 		this.onElement = onElement;
 		this.onScreenshot = onScreenshot;
+		this.onPickStateChange = onPickStateChange;
 	}
 
 	private async ensureBrowser(): Promise<Browser> {
@@ -85,27 +91,68 @@ export class WuchatBrowser implements vscode.Disposable {
 	}
 
 	async pickBrowserElement(): Promise<void> {
-		const page = await this.ensurePage();
-		await page.bringToFront();
-		const cdp = await page.context().newCDPSession(page);
+		if (this.pickAbort) {
+			this.cancelPickBrowserElement();
+			return;
+		}
+		const controller = new AbortController();
+		this.pickAbort = controller;
+		this.onPickStateChange?.(true);
 		try {
-			await cdp.send('DOM.enable');
-			await cdp.send('Overlay.enable');
-			await cdp.send('Overlay.setInspectMode', {
-				mode: 'searchForNode',
-				highlightConfig: { showInfo: true, contentColor: { r: 66, g: 133, b: 244, a: 0.25 }, borderColor: { r: 66, g: 133, b: 244, a: 1 } }
+			while (!controller.signal.aborted && await this.pickNextElement(controller)) { /* keep picking until canceled */ }
+		} finally {
+			this.pickAbort = undefined;
+			this.onPickStateChange?.(false);
+		}
+	}
+
+	private async pickNextElement(controller: AbortController): Promise<boolean> {
+		const sessions = new Map<Page, CDPSession>();
+		const registering = new Set<Promise<void>>();
+		let context: BrowserContext | undefined;
+		let onPage: ((page: Page) => void) | undefined;
+		try {
+			await this.ensurePage();
+			if (controller.signal.aborted) return false;
+			context = this.context!;
+			const selected = await new Promise<{ page: Page; cdp: CDPSession; backendNodeId: number } | undefined>((resolve, reject) => {
+				let finished = false;
+				const finish = (selection?: { page: Page; cdp: CDPSession; backendNodeId: number }, error?: Error) => {
+					if (finished) return;
+					finished = true;
+					controller.signal.removeEventListener('abort', cancel);
+					if (onPage) context?.off('page', onPage);
+					if (error) reject(error); else resolve(selection);
+				};
+				const cancel = () => finish();
+				const register = (page: Page): void => {
+					if (finished || page.isClosed() || sessions.has(page)) return;
+					const task = (async () => {
+						const cdp = await context!.newCDPSession(page);
+						sessions.set(page, cdp);
+						if (finished) return;
+						cdp.on('Overlay.inspectNodeRequested', ({ backendNodeId }: { backendNodeId: number }) => finish({ page, cdp, backendNodeId }));
+						cdp.on('Overlay.inspectModeCanceled', cancel);
+						await cdp.send('DOM.enable');
+						await cdp.send('Overlay.enable');
+						if (finished) return;
+						await cdp.send('Overlay.setInspectMode', {
+							mode: 'searchForNode',
+							highlightConfig: { showInfo: true, contentColor: { r: 66, g: 133, b: 244, a: 0.25 }, borderColor: { r: 66, g: 133, b: 244, a: 1 } }
+						});
+					})();
+					registering.add(task);
+					void task.catch(error => { if (!finished && !page.isClosed()) finish(undefined, error instanceof Error ? error : new Error(String(error))); }).finally(() => registering.delete(task));
+				};
+				onPage = register;
+				context!.on('page', register);
+				controller.signal.addEventListener('abort', cancel, { once: true });
+				for (const page of context!.pages()) register(page);
+				if (controller.signal.aborted) cancel();
 			});
-			const backendNodeId = await new Promise<number>((resolve, reject) => {
-				const timeout = setTimeout(() => reject(new Error('Element selection timed out.')), 60_000);
-				cdp.once('Overlay.inspectNodeRequested', ({ backendNodeId }: { backendNodeId: number }) => {
-					clearTimeout(timeout);
-					resolve(backendNodeId);
-				});
-				cdp.once('Overlay.inspectModeCanceled', () => {
-					clearTimeout(timeout);
-					reject(new Error('Element selection canceled.'));
-				});
-			});
+			if (!selected || controller.signal.aborted) return false;
+			const { page, cdp, backendNodeId } = selected;
+			this.page = page;
 			await cdp.send('Overlay.setInspectMode', { mode: 'none', highlightConfig: {} });
 			const { object } = await cdp.send('DOM.resolveNode', { backendNodeId });
 			if (!object.objectId) throw new Error('Selected element is no longer available.');
@@ -134,7 +181,7 @@ export class WuchatBrowser implements vscode.Disposable {
 			});
 			try {
 				const screenshot = await page.locator(`[${attribute}="${marker}"]`).screenshot({ type: 'png' });
-				await this.onElement?.(`Page: ${page.url()}\nSelector: ${value.selector}\nBounds: ${value.bounds.join(', ')}\nText: ${value.text}\nHTML: ${value.html}\nStyles: ${value.styles}`, screenshot, page.url());
+				if (!controller.signal.aborted) await this.onElement?.(`Page: ${page.url()}\nSelector: ${value.selector}\nBounds: ${value.bounds.join(', ')}\nText: ${value.text}\nHTML: ${value.html}\nStyles: ${value.styles}`, screenshot, page.url());
 			} finally {
 				await cdp.send('Runtime.callFunctionOn', {
 					objectId: object.objectId,
@@ -143,9 +190,18 @@ export class WuchatBrowser implements vscode.Disposable {
 				}).catch(() => {});
 			}
 		} finally {
-			await cdp.send('Overlay.setInspectMode', { mode: 'none', highlightConfig: {} }).catch(() => {});
-			await cdp.detach().catch(() => {});
+			if (context && onPage) context.off('page', onPage);
+			await Promise.allSettled([...registering]);
+			for (const cdp of sessions.values()) {
+				await cdp.send('Overlay.setInspectMode', { mode: 'none', highlightConfig: {} }).catch(() => {});
+				await cdp.detach().catch(() => {});
+			}
 		}
+		return !controller.signal.aborted;
+	}
+
+	cancelPickBrowserElement(): void {
+		this.pickAbort?.abort();
 	}
 
 	async captureScreenshot(): Promise<void> {
@@ -183,6 +239,7 @@ export class WuchatBrowser implements vscode.Disposable {
 
 	dispose(): void {
 		this.disposed = true;
+		this.cancelPickBrowserElement();
 		void this.browser?.close();
 	}
 }

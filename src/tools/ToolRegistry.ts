@@ -10,10 +10,29 @@ export class ToolRegistry {
 	private readonly tools = new Map<string, WuchatTool>();
 	private sessionAutoApprove = false;
 	private refreshTools?: () => void;
+	/** Per-tool approval policy, e.g. { "wuchat.runCommand": "allow" }. */
+	private approvalPolicy = new Map<string, 'allow' | 'ask'>();
 
 	setSessionAutoApprove(value: boolean): void { this.sessionAutoApprove = value; }
 	get isSessionAutoApproved(): boolean { return this.sessionAutoApprove; }
 	setToolRefresh(refresh?: () => void): void { this.refreshTools = refresh; }
+
+	/** Updates the granular allow/ask policy (wildcard keys like "mcp.*" supported). */
+	setApprovalPolicy(policy: Record<string, string>): void {
+		this.approvalPolicy = new Map(Object.entries(policy).map(([key, level]) => [key, level === 'allow' ? 'allow' : 'ask']));
+	}
+
+	/** "allow" when the policy explicitly allows the tool (wildcards, most specific wins). */
+	private policyAllows(toolId: string): boolean {
+		let decision: 'allow' | 'ask' | undefined;
+		for (const [pattern, level] of this.approvalPolicy) {
+			const matches = pattern.endsWith('*')
+				? toolId.startsWith(pattern.slice(0, -1))
+				: toolId === pattern;
+			if (matches) decision = level;
+		}
+		return decision === 'allow';
+	}
 
 	register(tool: WuchatTool): void {
 		this.tools.set(tool.id, tool);
@@ -52,11 +71,11 @@ export class ToolRegistry {
 		autoApprove: boolean,
 		token: CancellationToken,
 		confirm: (title: string, detail: string) => Promise<boolean>,
-		events?: Pick<WuchatToolInvocationContext, 'onFileChange' | 'onTodos'>
+			events?: Pick<WuchatToolInvocationContext, 'onFileChange' | 'onTodos' | 'onOutput'>
 	): Promise<string> {
 		const tool = this.getRequired(id);
 		const ctx: WuchatToolInvocationContext = { token, confirm, ...events };
-		if (tool.requiresApproval && !autoApprove) {
+		if (tool.requiresApproval && !autoApprove && !this.policyAllows(id)) {
 			const approved = await confirm(`Wuchat: allow "${tool.name}"?`, tool.description);
 			if (!approved) {
 				return `Tool "${tool.name}" was not approved by the user.`;

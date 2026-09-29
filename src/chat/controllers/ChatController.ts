@@ -18,6 +18,8 @@ export interface StreamCallbacks {
 	onAssistantStart?(agentName: string): void;
 	onChunk?(text: string): void;
 	onReasoning?(text: string): void;
+	/** Ends the current reasoning step, so the UI shows separate entries. */
+	onReasoningBoundary?(): void;
 	onToolCall?(progress: ToolProgress): void;
 	onPlan?(steps: AgentStep[]): void;
 	onTodos?(todos: TodoItem[]): void;
@@ -168,6 +170,7 @@ export class ChatController {
 			const result = await agent.invoke(request, provider, modelId, {
 				onText: text => callbacks.onChunk?.(text),
 				onReasoning: text => callbacks.onReasoning?.(text),
+				onReasoningBoundary: () => callbacks.onReasoningBoundary?.(),
 				onToolCall: progress => callbacks.onToolCall?.(progress),
 				onPlan: steps => callbacks.onPlan?.(steps),
 				onTodos: todos => callbacks.onTodos?.(todos),

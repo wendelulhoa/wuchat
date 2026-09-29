@@ -8,7 +8,7 @@ Running chats remain available in **Sessions**. You can start a new chat or work
 
 Wuchat runs in the local VS Code UI extension host, including in Remote-SSH workspaces. Its Playwright browser uses Chrome installed on your local machine; workspace file operations continue through VS Code's remote workspace APIs.
 
-The **Browser** control in Wuchat opens a real, interactive Chrome window, not a streamed preview in the editor. Use **Pick** in Wuchat, then click an element in Chrome to attach its HTML and a screenshot of that element to your next chat message; **Capture** attaches a screenshot of the visible page. Browser actions invoked by agents control this same window. Chrome must be installed locally (or set `CHROME_PATH`); no VS Code startup flags are needed. This is a separate OS window, not VS Code's built-in Browser tab. Selections made with VS Code's own Browser picker still go to VS Code Chat, not Wuchat.
+The **Browser** control in Wuchat opens a real, interactive Chrome window, not a streamed preview in the editor. Click **Pick**, then select one or more elements in Chrome. Each selection adds its HTML and a screenshot to the next chat message; click **Cancel pick** to exit selection mode. **Capture** attaches a screenshot of the visible page. You can also paste an image into the composer with Ctrl+V (up to 2 MB). Hover over or focus an image or picked-element attachment to preview it before sending. Browser actions invoked by agents control this same window. Chrome must be installed locally (or set `CHROME_PATH`); no VS Code startup flags are needed. This is a separate OS window, not VS Code's built-in Browser tab. Selections made with VS Code's own Browser picker still go to VS Code Chat, not Wuchat.
 
 ## Connect a provider
 

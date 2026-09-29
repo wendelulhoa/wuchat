@@ -81,12 +81,17 @@ export class BaseAgent implements Agent {
 			? [...request.history].reverse().find(message => message.role === 'assistant' && message.todos?.length)?.todos?.map(item => ({ ...item }))
 			: undefined;
 		const maxContextMessages = this.options.runtime?.maxContextMessages;
+		// Use the active model's real context window when it is known, so
+		// auto-compaction triggers near the actual limit (like Copilot) instead
+		// of a fixed guess.
+		const modelContextTokens = await llm.models?.().then(list => list.find(entry => entry.id === model)?.capabilities?.maxInputTokens).catch(() => undefined);
 		const history = await buildContext(
 			request,
 			llm,
 			model,
 			callbacks,
-			typeof maxContextMessages === 'function' ? maxContextMessages() : maxContextMessages ?? 40
+			typeof maxContextMessages === 'function' ? maxContextMessages() : maxContextMessages ?? 40,
+			modelContextTokens
 		);
 		const tools = buildToolDefinitions(allowedTools, this.toolRegistry);
 		const prompt = buildPrompt(this.systemPrompt, { ...request, tools });
@@ -94,11 +99,28 @@ export class BaseAgent implements Agent {
 		let nextStreamPrompt = prompt;
 		let idleContinuations = 0;
 		let stoppedWithOpenTasks = false;
+		const compactBudget = Math.floor((modelContextTokens ?? DEFAULT_CONTEXT_TOKENS) * (1 - CONTEXT_HEADROOM_RATIO)) * CHARS_PER_TOKEN;
 
-		let reachedRoundLimit = false;
-		for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
-			if (request.token.isCancellationRequested) {
-				break;
+		// No fixed round limit: the loop runs until the model stops calling
+		// tools, finishes the checklist, or the user cancels the request.
+		while (!request.token.isCancellationRequested) {
+
+			// Mid-turn auto-compaction: tool outputs accumulate across rounds and
+			// can overflow the window on long agentic runs (like Copilot does).
+			if (history.reduce((sum, message) => sum + message.content.length, 0) > compactBudget) {
+				const summaryIndex = history.findIndex(message => message.role === 'system' && message.content.startsWith('[context summary]'));
+				const compactFrom = history.findIndex(message => message.role === 'user' && message.content === prompt);
+				const cutoff = Math.max(compactFrom + 1, summaryIndex + 1, 0);
+				if (cutoff > 0 && cutoff < history.length - 2) {
+					try {
+						const transcript = history.slice(0, cutoff)
+							.map(message => `${message.role}: ${message.content.slice(0, 4_000)}`)
+							.join('\n\n');
+						callbacks.onSystemMessage?.('Wuchat: compacting mid-run context to stay within the model window…');
+						const summary = await summarize(llm, model, transcript, request.token);
+						history.splice(0, cutoff, { role: 'system', content: `[context summary] ${summary}` });
+					} catch { /* best-effort: keep the un-compacted history on failure */ }
+				}
 			}
 
 			let continueRound = false;
@@ -158,6 +180,9 @@ export class BaseAgent implements Agent {
 					reasoning += chunk.reasoning;
 					callbacks.onReasoning?.(chunk.reasoning);
 				}
+				if (chunk.reasoningBoundary) {
+					callbacks.onReasoningBoundary?.();
+				}
 				if (chunk.toolCall) {
 					toolRequests.push(chunk.toolCall);
 				}
@@ -165,7 +190,6 @@ export class BaseAgent implements Agent {
 			}
 
 			if (continueRound) {
-				round--;
 				continue;
 			}
 
@@ -176,9 +200,11 @@ export class BaseAgent implements Agent {
 			}
 
 			if (!request.token.isCancellationRequested && toolRequests.length === 0 && todos?.some(item => item.status !== 'completed')) {
-				if (idleContinuations < MAX_IDLE_CONTINUATIONS && round < MAX_AGENT_ROUNDS - 1) {
+				if (idleContinuations < MAX_IDLE_CONTINUATIONS) {
 					idleContinuations++;
-					if (round === 0) history.push({ role: 'user', content: prompt });
+					if (!history.some(message => message.role === 'user' && message.content === prompt)) {
+						history.push({ role: 'user', content: prompt });
+					}
 					if (turnText) history.push({ role: 'assistant', content: turnText });
 					history.push({ role: 'user', content: 'There are unfinished tasks in your checklist. Continue the work using tools, verify the result, and updateTodos with the actual status. Do not repeat your previous response. If blocked, explain what prevents completion.' });
 					continue;
@@ -190,7 +216,7 @@ export class BaseAgent implements Agent {
 			}
 			idleContinuations = 0;
 
-			if (round === 0) {
+			if (!history.some(message => message.role === 'user' && message.content === prompt)) {
 				history.push({ role: 'user', content: prompt });
 			}
 			history.push({ role: 'assistant', content: turnText, toolCallRequests: toolRequests });
@@ -227,7 +253,8 @@ export class BaseAgent implements Agent {
 							},
 							{
 								onFileChange: value => { change = value; },
-								onTodos: value => { todos = value; callbacks.onTodos?.(value); }
+								onTodos: value => { todos = value; callbacks.onTodos?.(value); },
+								onOutput: delta => callbacks.onToolCall?.({ ...step, tool: toolId, status: 'started', outputDelta: delta })
 							}
 						);
 						lastError = undefined;
@@ -254,9 +281,8 @@ export class BaseAgent implements Agent {
 				// only the persisted record is truncated for storage.
 				history.push({ role: 'tool', content: output, toolCallId: call.id, toolName: toolId });
 				const record = { id: call.id, tool: toolId, input: call.input, output: output.slice(0, 2000), status, ...(status === 'finished' ? { change } : {}) };
-				toolCalls.push(record);
-			}
-			if (round === MAX_AGENT_ROUNDS - 1) reachedRoundLimit = true;
+			toolCalls.push(record);
+		}
 		}
 
 		if (request.token.isCancellationRequested) {
@@ -265,10 +291,8 @@ export class BaseAgent implements Agent {
 		return {
 			text: [text.trimEnd(), summarizeExecution(toolCalls, todos)].filter(Boolean).join('\n\n'), reasoning: reasoning || undefined, toolCalls,
 			plan: plan.length ? plan : undefined, todos,
-			...(stoppedWithOpenTasks || (reachedRoundLimit && !request.token.isCancellationRequested)
-				? { error: stoppedWithOpenTasks
-					? 'Wuchat: the agent stopped with unfinished tasks. Continue in this chat to resume them.'
-					: `Wuchat: stopped after ${MAX_AGENT_ROUNDS} tool rounds. Continue in this chat to finish the remaining tasks.` }
+			...(stoppedWithOpenTasks && !request.token.isCancellationRequested
+				? { error: 'Wuchat: the agent stopped with unfinished tasks. Continue in this chat to resume them.' }
 				: {})
 		};
 	}
@@ -309,7 +333,10 @@ function describeStep(call: ToolCallRequest, agentTools: readonly string[], regi
 	}
 	const tool = registry.get(toolId);
 	const name = tool?.name ?? toolId;
-	detail = detail.replace(/\s+/g, ' ').trim().slice(0, 60);
+	// Commands keep their full text (truncated only visually) so the user can
+	// follow exactly what ran; other tools show the concise target.
+	const limit = toolId === 'wuchat.runCommand' ? 120 : 60;
+	detail = detail.replace(/\s+/g, ' ').trim().slice(0, limit);
 	return detail ? `${name}: ${detail}` : name;
 }
 
@@ -352,11 +379,14 @@ function toolInputToString(input: unknown): string {
 function buildPrompt(systemPrompt: string, request: ChatRequest): string {
 	const contextParts: string[] = [];
 	if (request.context.selection) {
-		contextParts.push(`The user selected this ${request.context.selection.language} code in ${request.context.selection.uri}:\n\`\`\`\n${request.context.selection.text.slice(0, 20_000)}\n\`\`\``);
+		const selection = request.context.selection.text;
+		contextParts.push(`The user selected this ${request.context.selection.language} code in ${request.context.selection.uri}:\n\`\`\`\n${selection}\n\`\`\`${selection.length > 20_000 ? `\n(selection has ${selection.length} characters)` : ''}`);
 	}
 	for (const attachment of request.context.attachments) {
 		if (attachment.text !== undefined) {
-			contextParts.push(`Attached file: ${attachment.name} (${attachment.uri})\n\`\`\`\n${attachment.text.slice(0, 40_000)}\n\`\`\``);
+			// Do not silently cut large files: include the full text (the context
+			// window compaction handles the size) and mark the length.
+			contextParts.push(`Attached file: ${attachment.name} (${attachment.uri}, ${attachment.text.length} characters)\n\`\`\`\n${attachment.text}\n\`\`\``);
 		} else {
 			contextParts.push(`Attached image: ${attachment.name} (${attachment.uri})`);
 		}
@@ -397,12 +427,15 @@ function isContinuationRequest(prompt: string): boolean {
 
 /** Maximum attempts for a single tool execution that fails transiently. */
 const MAX_TOOL_RETRIES = 5;
-const MAX_AGENT_ROUNDS = 30;
 const MAX_IDLE_CONTINUATIONS = 2;
 /** How many times a truncated stream may be resumed within one turn. */
 const MAX_STREAM_RESUMES = 3;
-/** Characters that fit, very roughly, in a model context window (conservative). */
-const APPROX_CONTEXT_CHARS = 160_000;
+/** Fallback context window (tokens) when the model does not report one. */
+const DEFAULT_CONTEXT_TOKENS = 128_000;
+/** Rough characters-per-token factor used to estimate transcript size. */
+const CHARS_PER_TOKEN = 4;
+/** Share of the context window that must remain free for the new turn + output. */
+const CONTEXT_HEADROOM_RATIO = 0.25;
 
 function isTransientConnectionError(message: string): boolean {
 	return /fetch failed|network|socket|econn(reset|refused|aborted)|enotfound|etimedout|timed out|connection (?:lost|closed|reset)|bridge (?:was not found|is not available)|provider response did not include a stream/i.test(message);
@@ -428,15 +461,17 @@ interface ContextSummaryEntry {
 
 /**
  * Builds the working history for a turn. Keeps the last messages verbatim and
- * summarizes older ones (once, lazily) when the transcript grows past a rough
- * character budget, so long sessions never silently forget earlier context.
+ * summarizes older ones when the transcript approaches the model's context
+ * window (with headroom for the new turn and the output), so long sessions
+ * never silently forget earlier context and never overflow the window.
  */
 async function buildContext(
 	request: ChatRequest,
 	llm: LLMProvider,
 	model: string,
 	callbacks: AgentStreamCallbacks,
-	maxContextMessages: number
+	maxContextMessages: number,
+	modelContextTokens?: number
 ): Promise<ChatMessage[]> {
 	const history: ChatMessage[] = request.history.map(restoreAssistantContext);
 	const markers = history.filter(message => message.role === 'system' && message.content.startsWith('[context summary]'));
@@ -444,9 +479,12 @@ async function buildContext(
 	const base = history.slice(0, baseIndex);
 	const rest = history.slice(baseIndex);
 
+	const contextTokens = modelContextTokens ?? DEFAULT_CONTEXT_TOKENS;
+	const usableTokens = Math.floor(contextTokens * (1 - CONTEXT_HEADROOM_RATIO));
+	const maxChars = usableTokens * CHARS_PER_TOKEN;
 	const totalChars = rest.reduce((sum, message) => sum + message.content.length, 0);
 	const budget = Math.max(4, maxContextMessages);
-	if (totalChars <= APPROX_CONTEXT_CHARS && rest.length <= budget) {
+	if (totalChars <= maxChars && rest.length <= budget) {
 		return history;
 	}
 

@@ -30,6 +30,8 @@ export interface ToolProgress extends AgentStep {
 	status: 'awaiting' | 'started' | 'finished' | 'failed' | 'rejected' | 'retrying';
 	output?: string;
 	change?: FileChange;
+	/** Live streaming output for command steps (appended to the panel). */
+	outputDelta?: string;
 }
 
 export interface ChatMessage {
@@ -110,6 +112,8 @@ export interface RequestContext {
 export interface ChatChunk {
 	text?: string;
 	reasoning?: string;
+	/** Marks the end of one reasoning block, so the UI can show separate steps. */
+	reasoningBoundary?: boolean;
 	toolCall?: ToolCallRequest;
 	error?: string;
 }
@@ -178,6 +182,8 @@ export interface AgentInvocationResult {
 export interface AgentStreamCallbacks {
 	onText?(text: string): void;
 	onReasoning?(text: string): void;
+	/** Ends the current reasoning step, so the UI shows separate entries. */
+	onReasoningBoundary?(): void;
 	onToolCall?(progress: ToolProgress): void;
 	/** Steps the agent announced (called once per plan announcement). */
 	onPlan?(steps: AgentStep[]): void;
@@ -224,6 +230,8 @@ export interface WuchatToolInvocationContext {
 	confirm(title: string, detail: string): Promise<boolean>;
 	onFileChange?(change: FileChange): void;
 	onTodos?(todos: TodoItem[]): void;
+	/** Streams live tool output (terminal chunks) to the chat panel. */
+	onOutput?(delta: string): void;
 }
 
 /** A tool an agent can call (read/edit files, run commands, ...). */

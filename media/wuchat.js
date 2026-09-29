@@ -210,6 +210,30 @@ function addActivityStep(activity, step) {
 	return row;
 }
 
+/** Renders reasoning as compact expandable steps instead of one long wall of text. */
+function renderReasoningSteps(container, raw) {
+	const parts = String(raw).split(/\n{2,}/).map(part => part.trim()).filter(Boolean);
+	container.replaceChildren(...parts.map((part, index) => {
+		const step = document.createElement('details');
+		step.className = 'reasoning-step';
+		if (index === parts.length - 1) step.open = true;
+		const summary = document.createElement('summary');
+		summary.textContent = firstSentence(part);
+		const content = document.createElement('div');
+		content.className = 'reasoning-step-content';
+		content.innerHTML = renderMarkdown(part);
+		step.append(summary, content);
+		return step;
+	}));
+}
+
+function firstSentence(text) {
+	const flat = text.replace(/\s+/g, ' ').trim();
+	const match = /^(.{0,120}?(?=[.!?。](?:\s|$))|.*)/.exec(flat);
+	const line = (match ? match[0] : flat).trim();
+	return line.length > 120 ? `${line.slice(0, 117)}…` : line || '(thinking)';
+}
+
 function updateActivitySummary(activity) {
 	const rows = [...activity.querySelectorAll('.activity-step')];
 	const completed = rows.filter(row => ['finished', 'failed', 'rejected'].includes(row.dataset.status)).length;
@@ -226,7 +250,7 @@ function updateActivityStep(activity, progress) {
 	const row = addActivityStep(activity, { id: progress.id, label: progress.label });
 	row.dataset.status = progress.status;
 	row.querySelector('.activity-status').textContent = ({ queued: 'Waiting', awaiting: 'Approval', started: 'Running', retrying: 'Retrying', finished: 'Done', failed: 'Failed', rejected: 'Skipped' })[progress.status] || progress.status;
-	if (!progress.output && progress.status === 'finished') row.querySelector('.activity-result')?.remove();
+	if (!progress.output && progress.status === 'finished' && !row.querySelector('.activity-result[data-live]')) row.querySelector('.activity-result')?.remove();
 	if (progress.output) {
 		let result = row.querySelector('.activity-result');
 		if (!result) {
@@ -363,6 +387,27 @@ function followResponse(update) {
 	if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// Heavy markdown re-renders are throttled so long streams never freeze the
+// UI (and the Stop button keeps responding while the agent works).
+let renderPending = false;
+let renderQueued = null;
+function throttledRender(update) {
+    if (!renderPending) {
+        renderPending = true;
+        setTimeout(() => {
+            renderPending = false;
+            if (renderQueued) {
+                const queued = renderQueued;
+                renderQueued = null;
+                throttledRender(queued);
+            }
+        }, 80);
+        followResponse(update);
+    } else {
+        renderQueued = update;
+    }
+}
+
 function addMessageElement(message, messageIndex = -1) {
 	messagesEl.querySelector('.wuchat-welcome')?.remove();
 	const wasNearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 100;
@@ -419,7 +464,7 @@ function addMessageElement(message, messageIndex = -1) {
 		summary.textContent = 'Thinking';
 		const reasoning = document.createElement('div');
 		reasoning.className = 'reasoning-content';
-		reasoning.innerHTML = renderMarkdown(message.reasoning);
+		renderReasoningSteps(reasoning, message.reasoning);
 		details.append(summary, reasoning);
 		wrap.insertBefore(details, body);
 	}
@@ -472,7 +517,15 @@ function addMessageElement(message, messageIndex = -1) {
 	return wrap;
 }
 
+let renderedSignature = '';
 function renderMessages(messages) {
+	// Skip identical re-renders: state posts happen on every stream/config event
+	// but the message list only changes when a turn completes.
+	const signature = `${messages.length}:${messages.at(-1)?.content?.length ?? 0}`;
+	if (signature === renderedSignature && document.getElementById('wuchat-pending') === null) {
+		return;
+	}
+	renderedSignature = signature;
 	// While streaming, keep the live pending bubble (and its partial text)
 	// instead of wiping it — a state refresh must not interrupt the response.
 	const pending = document.getElementById('wuchat-pending');
@@ -509,6 +562,7 @@ let index = 0;
 for (const message of messages) {
 	addMessageElement(message, index++);
 }
+renderedSignature = signature;
 if (pending) {
 	// Re-append the streaming bubble so partial text keeps updating.
 	messagesEl.appendChild(pending);
@@ -637,6 +691,23 @@ function setBusy(value) {
 	updateComposer();
 }
 
+/** Updates the slim context-window usage bar next to the composer. */
+function updateContextBar(tokens, limit) {
+	const bar = document.getElementById('wuchat-context-bar');
+	if (!bar) return;
+	if (!limit) { bar.hidden = true; return; }
+	const ratio = Math.min(1, tokens / limit);
+	const fill = document.getElementById('wuchat-context-fill');
+	const label = document.getElementById('wuchat-context-label');
+	if (fill) {
+		fill.style.width = `${Math.max(2, ratio * 100).toFixed(1)}%`;
+		fill.classList.toggle('warn', ratio >= 0.7);
+		fill.classList.toggle('critical', ratio >= 0.9);
+	}
+	if (label) label.textContent = `${Math.round(ratio * 100)}% context`;
+	bar.hidden = false;
+}
+
 function sendPrompt(steer = false) {
 	const text = inputEl.value.trim();
 	if (!text) return;
@@ -688,10 +759,62 @@ function renderQueue() {
 }
 
 document.getElementById('wuchat-attach').addEventListener('click', () => post({ type: 'attachFiles' }));
+const attachmentPreview = document.createElement('div');
+attachmentPreview.className = 'attachment-preview';
+attachmentPreview.setAttribute('role', 'tooltip');
+attachmentPreview.hidden = true;
+const previewName = document.createElement('span');
+previewName.className = 'attachment-preview-name';
+const previewImage = document.createElement('img');
+previewImage.alt = '';
+previewImage.hidden = true;
+attachmentPreview.append(previewName, previewImage);
+document.body.appendChild(attachmentPreview);
+let previewTag = null;
+let previewId = 0;
+function positionAttachmentPreview() {
+	if (!previewTag || attachmentPreview.hidden) return;
+	const rect = previewTag.getBoundingClientRect();
+	attachmentPreview.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - attachmentPreview.offsetWidth - 8))}px`;
+	const above = rect.top - attachmentPreview.offsetHeight - 8;
+	attachmentPreview.style.top = `${above >= 8 ? above : Math.min(rect.bottom + 8, innerHeight - attachmentPreview.offsetHeight - 8)}px`;
+}
+previewImage.addEventListener('load', positionAttachmentPreview);
+function hideAttachmentPreview() {
+	previewId++;
+	previewTag = null;
+	attachmentPreview.hidden = true;
+	previewImage.removeAttribute('src');
+}
+function showAttachmentPreview(tag) {
+	if (!tag || tag === previewTag || !tag.dataset.previewable) return;
+	previewTag = tag;
+	const requestId = ++previewId;
+	previewName.textContent = tag.querySelector('.attachment-name')?.textContent || 'Image';
+	previewImage.hidden = true;
+	attachmentPreview.hidden = false;
+	positionAttachmentPreview();
+	post({ type: 'previewAttachment', previewId: requestId, attachmentIndex: Number(tag.dataset.attachmentIndex), browserElementIndex: tag.dataset.browserElementIndex === undefined ? undefined : Number(tag.dataset.browserElementIndex) });
+}
+attachmentsEl.addEventListener('pointerover', event => {
+	const tag = event.target.closest('.attachment-tag');
+	if (tag?.contains(event.relatedTarget)) return;
+	showAttachmentPreview(tag);
+});
+attachmentsEl.addEventListener('pointerout', event => {
+	const tag = event.target.closest('.attachment-tag');
+	if (tag === previewTag && !tag.contains(event.relatedTarget)) hideAttachmentPreview();
+});
+attachmentsEl.addEventListener('focusin', event => showAttachmentPreview(event.target.closest('.attachment-tag')));
+attachmentsEl.addEventListener('focusout', event => {
+	if (previewTag && !previewTag.contains(event.relatedTarget)) hideAttachmentPreview();
+});
+inputEl.addEventListener('focus', hideAttachmentPreview);
+window.addEventListener('resize', hideAttachmentPreview);
 attachmentsEl.addEventListener('click', event => {
 	const button = event.target.closest('.attachment-remove');
 	if (!button) return;
-	if (button.dataset.removeBrowserElement) post({ type: 'removeBrowserElement' });
+	if (button.dataset.browserElementIndex !== undefined) post({ type: 'removeBrowserElement', browserElementIndex: Number(button.dataset.browserElementIndex) });
 	else post({ type: 'removeAttachment', attachmentIndex: Number(button.dataset.attachmentIndex) });
 });
 agentSelect.addEventListener('change', () => {
@@ -709,6 +832,30 @@ effortSelect.addEventListener('change', () => post({ type: 'setEffort', effort: 
 sendBtn.addEventListener('click', () => sendPrompt());
 stopBtn.addEventListener('click', () => post({ type: 'stop' }));
 inputEl.addEventListener('input', updateComposer);
+// Typing "@" opens the file picker and attaches the chosen file as context
+// (Kilo Code-style mention), replacing the "@..." token in the input.
+let mentionActive = false;
+inputEl.addEventListener('input', () => {
+	const upto = inputEl.value.slice(0, inputEl.selectionStart ?? 0);
+	if (!mentionActive && /(?:^|\s)@[\w.\-/]*$/.test(upto)) {
+		mentionActive = true;
+		post({ type: 'pickMentionFile' });
+	} else if (mentionActive && !/@[\w.\-/]*$/.test(upto)) {
+		mentionActive = false;
+	}
+});
+inputEl.addEventListener('paste', event => {
+	const images = [...(event.clipboardData?.items ?? [])]
+		.filter(item => item.kind === 'file' && /^image\/(png|jpeg|gif|webp)$/.test(item.type))
+		.map(item => item.getAsFile()).filter(Boolean);
+	if (!images.length) return;
+	event.preventDefault();
+	for (const file of images) {
+		const reader = new FileReader();
+		reader.onload = () => post({ type: 'pasteImage', name: file.name, data: reader.result });
+		reader.readAsDataURL(file);
+	}
+});
 inputEl.addEventListener('keydown', event => {
 	if (event.key === 'Enter' && !event.shiftKey) {
 		event.preventDefault();
@@ -749,7 +896,14 @@ historyBtn.addEventListener('click', () => showSessions(!showingSessions));
 document.getElementById('wuchat-settings').addEventListener('click', () => post({ type: 'openSettings' }));
 document.getElementById('wuchat-cli').addEventListener('click', () => post({ type: 'openCli' }));
 document.getElementById('wuchat-browser').addEventListener('click', () => post({ type: 'openBrowser' }));
-document.getElementById('wuchat-browser-pick').addEventListener('click', () => post({ type: 'pickBrowserElement' }));
+const browserPickButton = document.getElementById('wuchat-browser-pick');
+function setBrowserPickState(picking) {
+	browserPickButton.setAttribute('aria-pressed', String(picking));
+	browserPickButton.setAttribute('aria-label', picking ? 'Cancel browser element selection' : 'Select browser elements for Wuchat');
+	browserPickButton.textContent = picking ? 'Cancel pick' : 'Pick';
+	browserPickButton.title = picking ? 'Stop selecting page elements' : 'Select page elements for Wuchat';
+}
+browserPickButton.addEventListener('click', () => post({ type: 'pickBrowserElement' }));
 document.getElementById('wuchat-browser-capture').addEventListener('click', () => post({ type: 'captureBrowser' }));
 document.getElementById('wuchat-approval-mode').addEventListener('change', event => post({ type: 'setApprovalMode', effort: event.target.value }));
 executionModeSelect.addEventListener('change', event => post({ type: 'setExecutionMode', effort: event.target.value }));
@@ -820,10 +974,18 @@ window.addEventListener('message', event => {
 				}
 			}
 			executionModeSelect.value = message.executionMode || 'local';
+			setBrowserPickState(Boolean(message.pickingBrowser));
+			hideAttachmentPreview();
 			attachmentsEl.replaceChildren();
 			for (const attachment of message.attachments ?? []) {
 				const tag = document.createElement('span');
 				tag.className = 'attachment-tag';
+				if (attachment.previewable) {
+					tag.tabIndex = 0;
+					tag.dataset.previewable = 'true';
+					if (attachment.browserElementIndex !== undefined) tag.dataset.browserElementIndex = String(attachment.browserElementIndex);
+					else tag.dataset.attachmentIndex = String(attachment.index);
+				}
 				const name = document.createElement('span');
 				name.className = 'attachment-name';
 				name.textContent = attachment.name || 'Attachment';
@@ -833,7 +995,7 @@ window.addEventListener('message', event => {
 				remove.textContent = '×';
 				remove.title = `Remove ${attachment.name || 'attachment'}`;
 				remove.setAttribute('aria-label', remove.title);
-				if (attachment.browserElement) remove.dataset.removeBrowserElement = 'true';
+				if (attachment.browserElementIndex !== undefined) remove.dataset.browserElementIndex = String(attachment.browserElementIndex);
 				else remove.dataset.attachmentIndex = String(attachment.index);
 				tag.append(name, remove);
 				attachmentsEl.appendChild(tag);
@@ -850,9 +1012,12 @@ window.addEventListener('message', event => {
 			setBusy(Boolean(message.running));
 			const meter = document.getElementById('wuchat-context-meter');
 			if (meter && message.contextEstimate) {
-				meter.textContent = `${message.contextEstimate.tokens.toLocaleString()} tokens · ${message.contextEstimate.messages} msg`;
+				meter.textContent = message.contextLimit
+					? `${(message.contextEstimate.tokens / 1000).toFixed(1)}k / ${(message.contextLimit / 1000).toFixed(0)}k tokens`
+					: `${message.contextEstimate.tokens.toLocaleString()} tokens · ${message.contextEstimate.messages} msg`;
 				meter.title = 'Estimated context size sent to the model. Use Wuchat: Compact Context to summarize older turns.';
 			}
+			updateContextBar(message.contextEstimate?.tokens ?? 0, message.contextLimit);
 			if (message.transientError) addTransientError(message.transientError);
 			break;
 		}
@@ -868,7 +1033,18 @@ window.addEventListener('message', event => {
 			messagesEl.querySelector('.msg-transient-error')?.remove();
 			break;
 		case 'clearComposerAttachments':
+			hideAttachmentPreview();
 			attachmentsEl.replaceChildren();
+			break;
+		case 'attachmentPreview':
+			if (message.previewId === previewId && previewTag?.isConnected) {
+				previewImage.src = message.src;
+				previewImage.hidden = false;
+				positionAttachmentPreview();
+			}
+			break;
+		case 'browserPickState':
+			setBrowserPickState(Boolean(message.picking));
 			break;
 		case 'streamStart':
 			setBusy(true);
@@ -894,10 +1070,24 @@ window.addEventListener('message', event => {
 			messagesEl.scrollTop = messagesEl.scrollHeight;
 			break;
 		}
+		case 'mentionPicked': {
+			mentionActive = false;
+			const caret = inputEl.selectionStart ?? inputEl.value.length;
+			const before = inputEl.value.slice(0, caret);
+			const mentionMatch = /(?:^|\s)@[\w.\-/]*$/.exec(before);
+			if (mentionMatch) {
+				const start = caret - mentionMatch[0].length;
+				inputEl.value = inputEl.value.slice(0, start + 1) + message.relativePath + ' ' + inputEl.value.slice(caret);
+				inputEl.selectionStart = inputEl.selectionEnd = start + 1 + message.relativePath.length + 1;
+			}
+			inputEl.focus();
+			updateComposer();
+			break;
+		}
 		case 'assistantChunk': {
 			const body = document.getElementById('wuchat-pending-text');
 			if (body) {
-				followResponse(() => {
+				throttledRender(() => {
 					body.classList.remove('pending-indicator');
 					body.dataset.raw = (body.dataset.raw ?? '') + (message.text ?? '');
 					body.innerHTML = renderMarkdown(body.dataset.raw);
@@ -908,7 +1098,7 @@ window.addEventListener('message', event => {
 		case 'assistantReasoning': {
 			const pending = document.getElementById('wuchat-pending');
 			if (pending) {
-				followResponse(() => {
+				throttledRender(() => {
 					let details = pending.querySelector('.msg-reasoning');
 					if (!details) {
 						details = document.createElement('details');
@@ -921,11 +1111,26 @@ window.addEventListener('message', event => {
 						details.append(summary, body);
 						pending.insertBefore(details, pending.querySelector('.msg-activity, .msg-body'));
 					}
+					// Each reasoning block becomes its own step (like Copilot), with a
+					// one-line summary instead of one giant wall of text.
 					const body = details.querySelector('.reasoning-content');
 					body.dataset.raw = (body.dataset.raw ?? '') + (message.text ?? '');
-					body.innerHTML = renderMarkdown(body.dataset.raw);
+					renderReasoningSteps(body, body.dataset.raw);
 					const placeholder = pending.querySelector('#wuchat-pending-text.pending-indicator');
 					if (placeholder) { placeholder.textContent = ''; placeholder.classList.remove('pending-indicator'); }
+				});
+			}
+			break;
+		}
+		case 'reasoningBoundary': {
+			const pending = document.getElementById('wuchat-pending');
+			if (pending) {
+				followResponse(() => {
+					const body = pending.querySelector('.msg-reasoning .reasoning-content');
+					if (body && body.dataset.raw) {
+						body.dataset.steps = String(Number(body.dataset.steps ?? '0') + 1);
+						renderReasoningSteps(body, body.dataset.raw);
+					}
 				});
 			}
 			break;
@@ -974,6 +1179,51 @@ window.addEventListener('message', event => {
 						status: message.status,
 						output: message.output
 					});
+					// Live terminal output: append deltas to the step's panel so the
+					// command can be watched while it runs (like Copilot's terminal).
+					if (message.outputDelta) {
+						const stepId = message.id ?? legacyStep?.dataset.stepId ?? message.tool;
+						const row = activity.querySelector(`[data-step-id="${CSS.escape(stepId)}"]`);
+						let panel = row?.querySelector('.activity-result');
+						if (!panel) {
+							panel = document.createElement('details');
+							panel.className = 'activity-result';
+							panel.open = true;
+							const summary = document.createElement('summary');
+							summary.textContent = 'Command output';
+							const output = document.createElement('pre');
+							panel.append(summary, output);
+							// Interactive prompt: send keystrokes to the Wuchat terminal
+							// without leaving the chat (passwords, y/n, Ctrl+C).
+							const inputRow = document.createElement('div');
+							inputRow.className = 'activity-input-row';
+							const stdin = document.createElement('input');
+							stdin.type = 'password';
+							stdin.placeholder = 'Type to interact with the terminal…';
+							stdin.setAttribute('aria-label', 'Terminal input');
+							const send = document.createElement('button');
+							send.className = 'activity-input-send';
+							send.textContent = 'Send';
+							const submit = () => {
+								const value = stdin.value;
+								if (!value) return;
+								stdin.value = '';
+								post({ type: 'terminalInput', text: value, sendEnter: true });
+							};
+							send.addEventListener('click', submit);
+							stdin.addEventListener('keydown', event => {
+								if (event.key === 'Enter') { event.preventDefault(); submit(); }
+								if (event.ctrlKey && event.key === 'c') { event.preventDefault(); post({ type: 'terminalInput', text: '', sendEnter: false }); }
+							});
+							inputRow.append(stdin, send);
+							panel.append(inputRow);
+							row?.appendChild(panel);
+						}
+						const pre = panel.querySelector('pre');
+						pre.dataset.raw = (pre.dataset.raw ?? '') + message.outputDelta;
+						pre.textContent = String(pre.dataset.raw).slice(-8000);
+						panel.dataset.live = 'true';
+					}
 					if (message.status === 'finished' && message.change) addFileChange(pending, message.change);
 				});
 			}

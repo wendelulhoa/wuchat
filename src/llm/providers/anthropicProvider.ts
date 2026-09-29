@@ -199,7 +199,7 @@ async function* streamClaude(request: ChatRequest, model: string, token: string,
 		throw new Error(`Anthropic API ${response.status}: ${await response.text().catch(() => response.statusText)}`);
 	}
 	const toolInputs = new Map<number, { id: string; name: string; input: string }>();
-	for await (const data of readSse(response)) {
+	for await (const data of readSse(response, request.token)) {
 		const event = JSON.parse(data) as {
 			type?: string;
 			index?: number;
@@ -219,7 +219,12 @@ async function* streamClaude(request: ChatRequest, model: string, token: string,
 			}
 		} else if (event.type === 'content_block_stop' && event.index !== undefined) {
 			const input = toolInputs.get(event.index);
-			if (input) yield { toolCall: toToolCall(input.id, input.name, input.input) };
+			if (input) {
+				yield { toolCall: toToolCall(input.id, input.name, input.input) };
+			} else {
+				// End of a thinking/text block: the UI splits reasoning into steps.
+				yield { reasoningBoundary: true };
+			}
 		}
 	}
 }

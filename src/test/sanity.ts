@@ -10,7 +10,7 @@ import { ChatSession } from '../chat/sessions/ChatSession';
 import { BaseAgent, restoreAssistantContext } from '../agents/Agent';
 import { ProviderRegistry } from '../llm/ProviderRegistry';
 import { EchoProvider } from '../llm/providers/echoProvider';
-import { AgentStep, ChatRequest, ToolProgress } from '../common/types';
+import { AgentStep, ChatMessage, ChatRequest, ToolProgress } from '../common/types';
 import { ToolRegistry } from '../tools/ToolRegistry';
 import { fileChange, updateTodosTool } from '../tools/progress';
 
@@ -250,6 +250,36 @@ void (async (): Promise<void> => {
 	assert.strictEqual(compacted.text, 'Answer.');
 	assert.match(automaticSummaryPrompt, /Kept an earlier decision/);
 	assert.match(automaticSummaryPrompt, /Latest saved task status:\nin-progress: Verify CLI/);
+	// Mid-run auto-compaction: tool outputs overflowing the model window during
+	// an agentic loop are summarized between rounds.
+	let midRunSummaries = 0;
+	const overflowAgent = new BaseAgent({
+		id: 'test.overflow', name: 'Overflow', description: 'Tests mid-run compaction', systemPrompt: 'Test',
+		tools: ['test.inspect'],
+		capabilities: { readEditor: false, readWorkspace: true, editFiles: false, runTerminal: false }
+	}, tools);
+	let overflowRound = 0;
+	const overflowResult = await overflowAgent.invoke(request, {
+		id: 'test', name: 'Test provider',
+		models: async () => [{ id: 'test-model', name: 'Test', provider: 'test', capabilities: { maxInputTokens: 8_000 } }],
+		async *chat(currentRequest: ChatRequest) {
+			if (currentRequest.agent === 'wuchat.compact') {
+				midRunSummaries++;
+				yield { text: `Mid-run summary ${midRunSummaries}.` };
+				return;
+			}
+			overflowRound++;
+			if (overflowRound < 4) {
+				// Push large tool outputs so the in-loop history crosses the budget.
+				yield { toolCall: { id: `dump-${overflowRound}`, tool: 'test_inspect', input: { input: 'x'.repeat(30_000) } } };
+			} else {
+				assert.match(currentRequest.history.find((message: ChatMessage) => message.role === 'system')?.content ?? '', /Mid-run summary/);
+				yield { text: 'Done.' };
+			}
+		}
+	} as never, 'test-model');
+	assert.strictEqual(overflowResult.text, 'Done.');
+	assert.ok(midRunSummaries >= 1, 'expected at least one mid-run compaction');
 
 	const moduleLoader = nodeModule.default as unknown as { _load: (name: string, ...args: unknown[]) => unknown };
 	const originalLoad = moduleLoader._load;
@@ -432,6 +462,32 @@ void (async (): Promise<void> => {
 			}
 			assert.strictEqual(streamed[0].text, 'Hello ');
 			assert.deepStrictEqual(streamed[1].toolCall, { id: 'tu_1', tool: 'test_inspect', input: { input: 'src/a.ts' } });
+			// Cancellation stops the SSE reader promptly instead of draining it.
+			const { readSse } = await import('../llm/sse');
+			let cancelled = false;
+			const cancelledToken = {
+				isCancellationRequested: false,
+				onCancellationRequested: (listener: () => void) => {
+					setTimeout(() => { cancelled = true; listener(); }, 5);
+					return { dispose() {} };
+				}
+			};
+			const slowBody = new ReadableStream<Uint8Array>({
+				start(controller) {
+					const encoder = new TextEncoder();
+					let sent = 0;
+					const tick = setInterval(() => {
+						if (cancelled || sent >= 4) { clearInterval(tick); try { controller.close(); } catch { /* already closed by cancel() */ } return; }
+						try { controller.enqueue(encoder.encode(`data: {"n":${sent++}}\n\n`)); } catch { clearInterval(tick); }
+					}, 10);
+				}
+			});
+			const events: string[] = [];
+			for await (const data of readSse(new Response(slowBody, { status: 200 }), cancelledToken as never)) {
+				events.push(data);
+				await new Promise(resolve => setTimeout(resolve, 12));
+			}
+			assert.ok(events.length <= 3, `expected the reader to stop after cancellation, got ${events.length} events`);
 		} finally {
 			globalThis.fetch = originalFetch;
 		}

@@ -36,7 +36,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 	private cliSessionPoll?: NodeJS.Timeout;
 	private attachments: ChatAttachment[] = [];
 	private transientError?: string;
-	private browserElement?: { description: string; screenshot: Uint8Array; url: string };
+	private browserElements: Array<{ description: string; screenshot: Uint8Array; url: string }> = [];
 	private readonly lastRequests = new Map<string, { text: string; agentId?: string; context: RequestContext }>();
 	private readonly queues = new Map<string, Array<{ text: string; agentId?: string }>>();
 	/** Execution mode used by the next send; kept in memory so it never flips back mid-session. */
@@ -73,7 +73,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 		if (typeof message !== 'object' || message === null) {
 			return;
 		}
-		const msg = message as { type?: string; text?: string; sessionId?: string; providerId?: string; agentId?: string; model?: { provider: string; id: string } | null; effort?: string; attachmentIndex?: number; steer?: boolean; messageIndex?: number; upToIndex?: number; queueAction?: string; queueIndex?: number; items?: Array<{ text?: string; agentId?: string }>; openCli?: boolean; importCliSessions?: boolean };
+			const msg = message as { type?: string; text?: string; data?: string; previewId?: number; browserElementIndex?: number; sessionId?: string; providerId?: string; agentId?: string; model?: { provider: string; id: string } | null; effort?: string; attachmentIndex?: number; steer?: boolean; messageIndex?: number; upToIndex?: number; queueAction?: string; queueIndex?: number; items?: Array<{ text?: string; agentId?: string }>; openCli?: boolean; importCliSessions?: boolean; sendEnter?: boolean };
 		switch (msg.type) {
 			case 'ready':
 				await this.postState();
@@ -137,7 +137,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			case 'newChat':
 			case 'clear':
 				this.attachments = [];
-				this.browserElement = undefined;
+				this.browserElements = [];
 				this.toolRegistry.setSessionAutoApprove(false);
 				this.transientError = undefined;
 				this.controller.newSession();
@@ -175,6 +175,16 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			case 'openAgentTerminal':
 				await vscode.commands.executeCommand('wuchat.showAgentTerminal');
 				break;
+			case 'terminalInput': {
+				// Interactive input from the live command panel (passwords, y/n…).
+				const terminal = vscode.window.terminals.find(t => t.name === 'Wuchat Agent');
+				if (terminal) {
+					terminal.sendText(String(msg.text ?? ''), msg.sendEnter !== false);
+				} else {
+					vscode.window.showWarningMessage('Wuchat: the agent terminal is not open.');
+				}
+				break;
+			}
 			case 'pickBrowserElement':
 				try { await this.browser.pickBrowserElement(); }
 				catch (error) { void vscode.window.showErrorMessage(`Wuchat: ${error instanceof Error ? error.message : String(error)}`); }
@@ -241,6 +251,34 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			case 'attachFiles':
 				await this.attachFiles();
 				break;
+			case 'pickMentionFile':
+				await this.pickMentionFile();
+				break;
+			case 'pasteImage': {
+				const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(msg.data ?? '');
+				if (!match || match[2].length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 + 4) {
+					void vscode.window.showWarningMessage('Wuchat: paste a PNG, JPEG, GIF or WebP image up to 2 MB.');
+					break;
+				}
+				const data = Buffer.from(match[2], 'base64');
+				if (!data.length || data.byteLength > MAX_ATTACHMENT_BYTES) {
+					void vscode.window.showWarningMessage('Wuchat: pasted image exceeds 2 MB.');
+					break;
+				}
+				const extension = match[1] === 'image/jpeg' ? 'jpg' : match[1].slice(6);
+				this.attachments.push({ name: `Pasted image ${new Date().toLocaleTimeString()}.${extension}`, uri: 'wuchat-clipboard://image', mimeType: match[1], data });
+				await this.postState();
+				break;
+			}
+			case 'previewAttachment': {
+				const image = Number.isInteger(msg.browserElementIndex)
+					? { data: this.browserElements[msg.browserElementIndex!]?.screenshot, mimeType: 'image/png' }
+					: this.attachments[msg.attachmentIndex ?? -1];
+				if (image?.data && image.mimeType.startsWith('image/') && Number.isInteger(msg.previewId)) {
+					void this.view?.webview.postMessage({ type: 'attachmentPreview', previewId: msg.previewId, src: `data:${image.mimeType};base64,${Buffer.from(image.data).toString('base64')}` });
+				}
+				break;
+			}
 			case 'removeAttachment':
 				if (Number.isInteger(msg.attachmentIndex)) {
 					this.attachments.splice(msg.attachmentIndex!, 1);
@@ -248,7 +286,8 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 				}
 				break;
 			case 'removeBrowserElement':
-				this.browserElement = undefined;
+				if (!Number.isInteger(msg.browserElementIndex) || msg.browserElementIndex! < 0 || msg.browserElementIndex! >= this.browserElements.length) break;
+				this.browserElements.splice(msg.browserElementIndex!, 1);
 				await this.postState();
 				break;
 			case 'openFile':
@@ -277,7 +316,44 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 		}
 	}
 
-	private async attachFiles(): Promise<void> {
+	/** "@" in the composer: fuzzy-pick a workspace file and attach it as context. */
+	private async pickMentionFile(): Promise<void> {
+		const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**', 500);
+		const picks = files.slice(0, 300).map(uri => ({
+			label: `$(file) ${uri.path.split('/').at(-1) ?? uri.path}`,
+			description: vscode.workspace.asRelativePath(uri, false),
+			uri
+		}));
+		const picked = await vscode.window.showQuickPick(picks, {
+			title: 'Attach file to Wuchat (@mention)',
+			placeHolder: 'Type to filter workspace files'
+		});
+		if (!picked) return;
+		await this.attachUri(picked.uri);
+		if (this.view) {
+			await this.view.webview.postMessage({ type: 'mentionPicked', relativePath: picked.description });
+		}
+	}
+
+	private async attachFiles(): Promise<void> {		// An open text editor is a first-class attachment source: clicking "+"
+		// offers the active file first so it can be added with one click.
+		const active = vscode.window.activeTextEditor;
+		const choices: Array<{ label: string; description?: string; pick: 'active' | 'browse' }> = [];
+		if (active && active.document.uri.scheme === 'file') {
+			const relative = vscode.workspace.asRelativePath(active.document.uri, false);
+			choices.push({ label: `$(file) ${active.document.fileName}`, description: `Open file · ${relative}`, pick: 'active' });
+		}
+		choices.push({ label: '$(new-file) Browse…', pick: 'browse' });
+		const choice = await vscode.window.showQuickPick(choices, { title: 'Attach to Wuchat' });
+		if (!choice) return;
+		if (choice.pick === 'browse') {
+			await this.browseAndAttach();
+			return;
+		}
+		await this.attachUri(active!.document.uri);
+	}
+
+	private async browseAndAttach(): Promise<void> {
 		const workspace = vscode.workspace.workspaceFolders?.[0];
 		const uris = await vscode.window.showOpenDialog({
 			title: 'Attach files to Wuchat',
@@ -292,32 +368,38 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 		}
 
 		for (const uri of uris) {
-			const ext = extensionOf(uri);
-			const mimeType = IMAGE_MIME_TYPES[ext] ?? 'text/plain';
-			if (!IMAGE_MIME_TYPES[ext] && !TEXT_EXTENSIONS.has(ext)) {
-				vscode.window.showWarningMessage(`Wuchat cannot attach ${vscode.workspace.asRelativePath(uri)}. Choose a text or image file.`);
-				continue;
-			}
-			try {
-				const data = await vscode.workspace.fs.readFile(uri);
-				if (data.byteLength > MAX_ATTACHMENT_BYTES) {
-					vscode.window.showWarningMessage(`Wuchat skipped ${vscode.workspace.asRelativePath(uri)} because it is larger than 2 MB.`);
-					continue;
-				}
-				const name = uri.path.split('/').at(-1) ?? uri.path;
-				const attachment: ChatAttachment = {
-					name,
-					uri: vscode.workspace.asRelativePath(uri),
-					mimeType,
-					data: new Uint8Array(data),
-					...(!IMAGE_MIME_TYPES[ext] ? { text: new TextDecoder().decode(data) } : {})
-				};
-				this.attachments.push(attachment);
-			} catch (err) {
-				vscode.window.showWarningMessage(`Wuchat could not attach ${uri.path}: ${err instanceof Error ? err.message : String(err)}`);
-			}
+			await this.attachUri(uri);
 		}
 		await this.postState();
+	}
+
+	/** Reads a file and adds it as a chat attachment (shared by "+" flows). */
+	private async attachUri(uri: vscode.Uri): Promise<void> {
+		const ext = extensionOf(uri);
+		const mimeType = IMAGE_MIME_TYPES[ext] ?? 'text/plain';
+		if (!IMAGE_MIME_TYPES[ext] && !TEXT_EXTENSIONS.has(ext)) {
+			vscode.window.showWarningMessage(`Wuchat cannot attach ${vscode.workspace.asRelativePath(uri)}. Choose a text or image file.`);
+			return;
+		}
+		try {
+			const data = await vscode.workspace.fs.readFile(uri);
+			if (data.byteLength > MAX_ATTACHMENT_BYTES) {
+				vscode.window.showWarningMessage(`Wuchat skipped ${vscode.workspace.asRelativePath(uri)} because it is larger than 2 MB.`);
+				return;
+			}
+			const name = uri.path.split('/').at(-1) ?? uri.path;
+			const attachment: ChatAttachment = {
+				name,
+				uri: vscode.workspace.asRelativePath(uri),
+				mimeType,
+				data: new Uint8Array(data),
+				...(!IMAGE_MIME_TYPES[ext] ? { text: new TextDecoder().decode(data) } : {})
+			};
+			this.attachments.push(attachment);
+			await this.postState();
+		} catch (err) {
+			vscode.window.showWarningMessage(`Wuchat could not attach ${uri.path}: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	}
 
 	private async openFileFromChat(target: string | undefined): Promise<void> {
@@ -355,8 +437,12 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 	}
 
 	async addBrowserElement(description: string, screenshot: Uint8Array, url: string): Promise<void> {
-		this.browserElement = { description, screenshot, url };
-		if (!this.streaming) await this.postState();
+		this.browserElements.push({ description, screenshot, url });
+		await this.postState();
+	}
+
+	updateBrowserPickState(picking: boolean): void {
+		void this.view?.webview.postMessage({ type: 'browserPickState', picking });
 	}
 
 	async addBrowserScreenshot(data: Uint8Array, url: string): Promise<void> {
@@ -378,7 +464,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 		if (this.controller.session.id === sessionId) this.transientError = undefined;
 		const post = (message: StreamEvent) => {
 			const events = this.pendingEvents.get(sessionId);
-			if (events && ['assistantStart', 'assistantChunk', 'assistantReasoning', 'toolCall', 'plan', 'todos', 'system'].includes(message.type)) {
+			if (events && ['assistantStart', 'assistantChunk', 'assistantReasoning', 'reasoningBoundary', 'toolCall', 'plan', 'todos', 'system'].includes(message.type)) {
 				const last = events.at(-1);
 				if (last?.type === message.type && (message.type === 'assistantChunk' || message.type === 'assistantReasoning')) last.text = (last.text ?? '') + (message.text ?? '');
 				else events.push({ ...message });
@@ -392,12 +478,11 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 		if (!retryContext && selected) {
 			const selection = getActiveSelection();
 			if (selection) context.selection = selection;
-			if (this.browserElement) {
-				const { description: text, screenshot, url } = this.browserElement;
-				context.attachments.push({ name: 'Selected page element.html', uri: 'wuchat-browser://selection', mimeType: 'text/html', data: new TextEncoder().encode(text), text });
-				context.attachments.push({ name: 'Selected page element.png', uri: url, mimeType: 'image/png', data: screenshot });
+			for (const [index, { description: text, screenshot, url }] of this.browserElements.entries()) {
+				context.attachments.push({ name: `Selected page element ${index + 1}.html`, uri: 'wuchat-browser://selection', mimeType: 'text/html', data: new TextEncoder().encode(text), text });
+				context.attachments.push({ name: `Selected page element ${index + 1}.png`, uri: url, mimeType: 'image/png', data: screenshot });
 			}
-			this.browserElement = undefined;
+			this.browserElements = [];
 		}
 		if (selected) this.lastRequests.set(sessionId, { text, agentId, context });
 
@@ -415,6 +500,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 				},
 				onChunk: chunk => post({ type: 'assistantChunk', text: chunk }),
 				onReasoning: chunk => post({ type: 'assistantReasoning', text: chunk }),
+				onReasoningBoundary: () => post({ type: 'reasoningBoundary' }),
 				onToolCall: progress => post({ type: 'toolCall', ...progress }),
 				onPlan: steps => post({ type: 'plan', steps }),
 				onTodos: todos => post({ type: 'todos', todos }),
@@ -591,10 +677,12 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 		}
 		await this.syncCliSessions();
 		const config = vscode.workspace.getConfiguration('wuchat');
+		// Listing models hits provider HTTP APIs: cache for 60s so frequent
+		// postState calls (stream events, config changes) stay cheap.
 		const modelGroups = await Promise.all(this.providerRegistry.list().map(async provider => ({
 			id: provider.id,
 			name: provider.name,
-			models: provider.models ? await provider.models().catch(() => []) : []
+			models: provider.models ? await this.cachedModels(provider.id, () => provider.models!()) : []
 		})));
 		await this.view.webview.postMessage({
 			type: 'state',
@@ -605,9 +693,11 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			pendingEvents: this.pendingEvents.get(this.controller.session.id) ?? [],
 			queue: this.queues.get(this.controller.session.id) ?? [],
 			contextEstimate: this.controller.contextEstimate,
+			contextLimit: await this.currentContextLimit(),
 			workspaceName: vscode.workspace.workspaceFolders?.[0]?.name ?? 'No workspace',
+			pickingBrowser: this.browser.isPicking,
 			autoApproveTools: config.get<boolean>('autoApproveTools', false),
-			attachments: [...this.attachments.map((file, index) => ({ name: file.name, index })), ...(this.browserElement ? [{ name: 'Browser element + screenshot', browserElement: true }] : [])],
+			attachments: [...this.attachments.map((file, index) => ({ name: file.name, index, previewable: file.mimeType.startsWith('image/') })), ...this.browserElements.map((element, index) => ({ name: `Element ${index + 1}: ${element.description.match(/^Selector: (.+)$/m)?.[1] ?? element.url}`, browserElementIndex: index, previewable: true }))],
 			approvalMode: config.get<boolean>('autoApproveTools', false) ? 'configured' : this.toolRegistry.isSessionAutoApproved ? 'session' : 'ask',
 			agents: this.agentManager.list().map(agent => ({ id: agent.id, name: agent.name, description: agent.description })),
 			modelGroups,
@@ -620,9 +710,36 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 		});
 	}
 
+	/** Context window (tokens) of the active model, for the usage indicator. */
+	private readonly modelListCache = new Map<string, { at: number; models: Awaited<ReturnType<NonNullable<import('../../common/types').LLMProvider['models']>>> }>();
+
+	private async cachedModels(providerId: string, list: () => Promise<Array<{ id: string; name: string; provider: string }>>): Promise<Array<{ id: string; name: string; provider: string }>> {
+		const cached = this.modelListCache.get(providerId);
+		if (cached && Date.now() - cached.at < 60_000) return cached.models;
+		try {
+			const models = await list();
+			this.modelListCache.set(providerId, { at: Date.now(), models });
+			return models;
+		} catch {
+			return cached?.models ?? [];
+		}
+	}
+
+	private async currentContextLimit(): Promise<number | undefined> {
+		const config = vscode.workspace.getConfiguration('wuchat');
+		const provider = this.providerRegistry.get(config.get<string>('provider', 'anthropic'));
+		const modelId = config.get<string>('model', '');
+		try {
+			const models = provider?.models ? await provider.models() : [];
+			return models.find(model => model.id === modelId)?.capabilities?.maxInputTokens
+				?? models[0]?.capabilities?.maxInputTokens;
+		} catch {
+			return undefined;
+		}
+	}
+
 	/** Imports newly written or updated CLI transcripts into the VS Code history. */
-	private async syncCliSessions(): Promise<void> {
-		await this.controller.reconcileRunningSessions();
+	private async syncCliSessions(): Promise<void> {		await this.controller.reconcileRunningSessions();
 		const directory = path.join(homedir(), '.wuchat', 'sessions');
 		let files: string[];
 		try {
@@ -678,7 +795,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; img-src ${webview.cspSource}; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};">
+		<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; img-src ${webview.cspSource} data:; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<link rel="stylesheet" href="${styles}">
 	<title>Wuchat</title>
@@ -721,7 +838,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			</div>
 		</div>
 		<div id="wuchat-queue" hidden></div>
-		<div class="composer-status"><span id="wuchat-workspace-label"></span><span class="status-separator">·</span><span id="wuchat-context-meter" title="Estimated context size"></span><span class="status-separator">·</span><label class="sr-only" for="wuchat-execution-mode">Run via</label><select id="wuchat-execution-mode" title="Where messages are processed"><option value="local">Local</option><option value="cli">CLI</option></select><span class="status-separator">·</span><label class="sr-only" for="wuchat-approval-mode">Tool approval</label><select id="wuchat-approval-mode" title="Tool approval for this session"><option value="ask">Ask every time</option><option value="session">Approve for me · session</option><option value="configured" disabled>Auto approve in Settings</option></select><span class="browser-actions"><button class="composer-browser" id="wuchat-browser" title="Open Wuchat's Chrome window" aria-label="Open Wuchat Browser">Browser ↗</button><button class="composer-browser" id="wuchat-browser-pick" title="Click an element in Chrome to attach it to Wuchat" aria-label="Select browser element for Wuchat">Pick</button><button class="composer-browser" id="wuchat-browser-capture" title="Attach Chrome screenshot to Wuchat" aria-label="Capture browser screenshot for Wuchat">Capture</button></span></div>
+		<div class="composer-status"><span class="context-bar" id="wuchat-context-bar" title="Context window usage" hidden><span class="context-bar-track"><span class="context-bar-fill" id="wuchat-context-fill"></span></span><span class="context-bar-label" id="wuchat-context-label"></span></span><span id="wuchat-workspace-label"></span><span class="status-separator">·</span><span id="wuchat-context-meter" title="Estimated context size"></span><span class="status-separator">·</span><label class="sr-only" for="wuchat-execution-mode">Run via</label><select id="wuchat-execution-mode" title="Where messages are processed"><option value="local">Local</option><option value="cli">CLI</option></select><span class="status-separator">·</span><label class="sr-only" for="wuchat-approval-mode">Tool approval</label><select id="wuchat-approval-mode" title="Tool approval for this session"><option value="ask">Ask every time</option><option value="session">Approve for me · session</option><option value="configured" disabled>Auto approve in Settings</option></select><span class="browser-actions"><button class="composer-browser" id="wuchat-browser" title="Open Wuchat's Chrome window" aria-label="Open Wuchat Browser">Browser ↗</button><button class="composer-browser" id="wuchat-browser-pick" title="Click an element in Chrome to attach it to Wuchat" aria-label="Select browser element for Wuchat">Pick</button><button class="composer-browser" id="wuchat-browser-capture" title="Attach Chrome screenshot to Wuchat" aria-label="Capture browser screenshot for Wuchat">Capture</button></span></div>
 	</footer>
 	<script nonce="${nonce}" src="${script}"></script>
 </body>

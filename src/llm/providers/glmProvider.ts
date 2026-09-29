@@ -5,10 +5,11 @@
 
 import { ChatChunk, ChatRequest, LLMProvider, ModelInfo } from '../../common/types';
 import { SecretManager } from '../secrets';
-import { readSse, toToolCall } from '../sse';
+import { fetchJson, readSse, toToolCall } from '../sse';
 
-const CHAT_COMPLETIONS_URL = process.env.ZAI_BASE_URL
-	? `${process.env.ZAI_BASE_URL.replace(/\/+$/, '')}/chat/completions`
+const REQUEST_TIMEOUT_MS = 600_000;
+
+const CHAT_COMPLETIONS_URL = process.env.ZAI_BASE_URL	? `${process.env.ZAI_BASE_URL.replace(/\/+$/, '')}/chat/completions`
 	: 'https://api.z.ai/api/coding/paas/v4/chat/completions';
 
 const MODELS: Array<{ id: string; name: string; detail: string }> = [
@@ -70,6 +71,8 @@ async function* streamGlm(request: ChatRequest, model: string, apiKey: string): 
 		messages: toGlmMessages(request),
 		temperature: 1,
 		top_p: 0.95,
+		// Large explicit budget so big file writes are not cut mid-variable.
+		max_tokens: Number(process.env.WUCHAT_MAX_OUTPUT_TOKENS ?? 32_768),
 		...(effort && effort !== 'auto' && EFFORT_LEVELS.has(effort) ? { reasoning_effort: effort } : {}),
 		thinking: { type: 'enabled', clear_thinking: false },
 		...(request.tools.length ? {
@@ -81,16 +84,16 @@ async function* streamGlm(request: ChatRequest, model: string, apiKey: string): 
 			tool_stream: true
 		} : {})
 	};
-	const response = await fetch(CHAT_COMPLETIONS_URL, {
+	const response = await fetchJson(CHAT_COMPLETIONS_URL, {
 		method: 'POST',
 		headers: { authorization: `Bearer ${apiKey}`, accept: 'text/event-stream', 'content-type': 'application/json' },
 		body: JSON.stringify(payload)
-	});
+	}, REQUEST_TIMEOUT_MS, request.token);
 	if (!response.ok || !response.body) {
 		throw new Error(`Z.AI API ${response.status}: ${await response.text().catch(() => response.statusText)}`);
 	}
 	const calls = new Map<number, { id: string; name: string; arguments: string }>();
-	for await (const data of readSse(response)) {
+	for await (const data of readSse(response, request.token)) {
 		if (data === '[DONE]') break;
 		const event = JSON.parse(data) as {
 			error?: { message?: string };

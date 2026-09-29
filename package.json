@@ -2,7 +2,7 @@
 	"name": "wuchat",
 	"displayName": "Wuchat",
 	"description": "Independent AI chat for VS Code — pluggable LLM providers, agents and tools, with its own Activity Bar area.",
-	"version": "0.2.56",
+	"version": "0.2.61",
 	"publisher": "wuchat",
 	"license": "MIT",
 	"icon": "media/icon.png",
@@ -368,6 +368,24 @@
 					"type": "boolean",
 					"default": false,
 					"description": "Run tools without asking for confirmation (not recommended)."
+				},
+				"wuchat.tools.approval": {
+					"type": "object",
+					"default": {},
+					"description": "Per-tool approval policy: { \"wuchat.runCommand\": \"allow\", \"mcp.*\": \"allow\", \"wuchat.deleteFile\": \"ask\" }. \"allow\" never prompts, anything else (or missing) asks. Wildcards are supported.",
+					"additionalProperties": {
+						"type": "string",
+						"enum": [
+							"allow",
+							"ask"
+						]
+					}
+				},
+				"wuchat.commandTimeoutSeconds": {
+					"type": "number",
+					"default": 90,
+					"minimum": 10,
+					"description": "Maximum seconds a terminal command may run before Wuchat returns the output collected so far (the command keeps running in the terminal)."
 				},
 				"wuchat.tools.enabled": {
 					"type": "array",

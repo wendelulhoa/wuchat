@@ -4,25 +4,36 @@
 
 import { CancellationToken, ToolCallRequest } from '../common/types';
 
-/** Reads `data:` lines from an SSE response body. */
-export async function* readSse(response: Response): AsyncIterable<string> {
+/** Reads `data:` lines from an SSE response body; stops promptly on cancellation. */
+export async function* readSse(response: Response, token?: CancellationToken): AsyncIterable<string> {
 	const reader = response.body!.getReader();
-	const decoder = new TextDecoder();
-	let buffer = '';
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		buffer += decoder.decode(value, { stream: true });
-		let index: number;
-		while ((index = buffer.indexOf('\n\n')) >= 0) {
-			const raw = buffer.slice(0, index);
-			buffer = buffer.slice(index + 2);
-			const data = raw.split('\n')
-				.filter(line => line.startsWith('data:'))
-				.map(line => line.slice(5).trim())
-				.join('\n');
-			if (data) yield data;
+	const abort = new AbortController();
+	const subscription = token?.onCancellationRequested(() => {
+		abort.abort();
+		void reader.cancel().catch(() => undefined);
+	});
+	try {
+		const decoder = new TextDecoder();
+		let buffer = '';
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			buffer += decoder.decode(value, { stream: true });
+			let index: number;
+			while ((index = buffer.indexOf('\n\n')) >= 0) {
+				const raw = buffer.slice(0, index);
+				buffer = buffer.slice(index + 2);
+				const data = raw.split('\n')
+					.filter(line => line.startsWith('data:'))
+					.map(line => line.slice(5).trim())
+					.join('\n');
+				if (data) yield data;
+			}
+			if (token?.isCancellationRequested) break;
 		}
+	} finally {
+		subscription?.dispose();
+		void reader.cancel().catch(() => undefined);
 	}
 }
 
