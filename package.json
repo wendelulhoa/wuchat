@@ -2,7 +2,7 @@
 	"name": "wuchat",
 	"displayName": "Wuchat",
 	"description": "Independent AI chat for VS Code — pluggable LLM providers, agents and tools, with its own Activity Bar area.",
-	"version": "0.2.48",
+	"version": "0.2.56",
 	"publisher": "wuchat",
 	"license": "MIT",
 	"icon": "media/icon.png",
@@ -100,6 +100,26 @@
 			{
 				"command": "wuchat.cancelGeneration",
 				"title": "Wuchat: Cancel Generation",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.showAgentTerminal",
+				"title": "Wuchat: Show Agent Terminal",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.connectOAuth",
+				"title": "Wuchat: Sign In (Claude / ChatGPT Codex)",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.importCliLogin",
+				"title": "Wuchat: Import CLI Login (Claude / Codex)",
+				"category": "Wuchat"
+			},
+			{
+				"command": "wuchat.signOut",
+				"title": "Wuchat: Sign Out (Claude / ChatGPT Codex)",
 				"category": "Wuchat"
 			},
 			{
@@ -309,20 +329,20 @@
 			"properties": {
 				"wuchat.provider": {
 					"type": "string",
-					"default": "claude-plan",
+					"default": "anthropic",
 					"enum": [
-						"claude-plan",
+						"anthropic",
 						"openai-codex",
 						"zai-glm",
 						"echo"
 					],
 					"enumDescriptions": [
-						"Claude Plan models provided by the companion provider extension.",
+						"Anthropic models with direct API-key login stored in Wuchat.",
 						"ChatGPT Codex models provided by the companion provider extension.",
-						"Z.AI GLM models provided by the companion provider extension.",
+						"Z.AI GLM models with direct API-key login stored in Wuchat.",
 						"Built-in offline echo provider."
 					],
-					"description": "Active Wuchat provider. The Claude Plan + Codex extension supplies the first three providers."
+					"description": "Active Wuchat provider. Anthropic and Z.AI sign in directly in Wuchat; others use their provider extension."
 				},
 				"wuchat.model": {
 					"type": "string",
@@ -447,7 +467,7 @@
 		"install-local": "node scripts/install.mjs",
 		"lint": "eslint src --ext ts",
 		"pretest": "npm run compile",
-		"test": "npm run typecheck && esbuild src/test/sanity.ts --bundle --platform=node --target=node22 --outfile=/tmp/wuchat-sanity.js && node /tmp/wuchat-sanity.js",
+		"test": "npm run typecheck && esbuild src/test/sanity.ts --bundle --platform=node --target=node22 --external:vscode --outfile=/tmp/wuchat-sanity.js && node /tmp/wuchat-sanity.js",
 		"bump-version": "node scripts/bump-version.mjs"
 	},
 	"devDependencies": {

@@ -84,22 +84,48 @@ const openFileTool: WuchatTool = {
 const runCommandTool: WuchatTool = {
 	id: 'wuchat.runCommand',
 	name: 'Run Terminal Command',
-	description: 'Runs a command in the dedicated Wuchat integrated terminal. Destructive commands require confirmation.',
+	description: 'Runs a command in the workspace, captures its output and exit status. Local commands are non-interactive and time out after 120 seconds. Destructive commands require confirmation.',
 	requiresApproval: false,
 	inputSchema: 'the command line to run',
 	async invoke(rawInput: string, ctx) {
-		return runTerminalCommand(rawInput.trim(), ctx.confirm);
+		return runTerminalCommand(rawInput.trim(), ctx.confirm, ctx.token);
 	}
 };
 
 const listWorkspaceTool: WuchatTool = {
 	id: 'wuchat.listWorkspace',
-	name: 'List Workspace',
-	description: 'Lists the top-level files and folders of the workspace.',
+	name: 'List Directory',
+	description: 'Lists files and folders. Without input lists the workspace root; accepts a relative path or an absolute path (e.g. /home/user/other-project) to browse other folders.',
 	requiresApproval: false,
-	inputSchema: '(no input)',
-	async invoke(): Promise<string> {
-		return listWorkspaceTree();
+	inputSchema: 'optional relative or absolute directory path',
+	async invoke(rawInput: string): Promise<string> {
+		return listWorkspaceTree(firstLine(rawInput).trim());
+	}
+};
+
+const deleteFileTool: WuchatTool = {
+	id: 'wuchat.deleteFile',
+	name: 'Delete File',
+	description: 'Deletes a file or folder (recursively). ALWAYS requires explicit user approval.',
+	requiresApproval: true,
+	inputSchema: 'relative or absolute file/folder path',
+	async invoke(rawInput: string, ctx) {
+		const target = firstLine(rawInput).trim();
+		if (!target) throw new Error('Wuchat: provide the path of the file or folder to delete.');
+		const root = vscode.workspace.workspaceFolders?.[0];
+		if (!root) throw new Error('Wuchat: no workspace folder is open.');
+		const uri = resolveWorkspacePath(root, target);
+		let stat: vscode.FileStat;
+		try {
+			stat = await vscode.workspace.fs.stat(uri);
+		} catch {
+			return `Path not found: ${target}`;
+		}
+		const kind = stat.type & vscode.FileType.Directory ? 'folder' : 'file';
+		const approved = await ctx.confirm(`Wuchat: delete ${kind} "${target}"?`, 'This action cannot be undone.');
+		if (!approved) return 'Deletion was not approved by the user.';
+		await vscode.workspace.fs.delete(uri, { recursive: true, useTrash: false });
+		return `Deleted ${kind} ${target}.`;
 	}
 };
 
@@ -199,6 +225,7 @@ export const defaultTools: WuchatTool[] = [
 	openFileTool,
 	runCommandTool,
 	listWorkspaceTool,
+	deleteFileTool,
 	applyEditTool,
 	runPlaywrightTool
 ];

@@ -6,7 +6,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
-import { WuchatTool, WuchatToolInvocationContext } from '../common/types';
+import { WuchatTool } from '../common/types';
 import { Logger } from '../common/logger';
 import { ToolRegistry } from './ToolRegistry';
 
@@ -23,12 +23,14 @@ export function registerMcpTools(registry: ToolRegistry, logger: Logger): vscode
 	const sync = () => {
 		const contributed = vscode.lm.tools ?? [];
 		const seen = new Set<string>();
+		let changed = false;
 		for (const tool of contributed) {
 			const id = MCP_PREFIX + tool.name;
 			seen.add(id);
 			if (registered.has(id)) continue;
 			const wuchatTool = wrapLanguageModelTool(tool);
 			registry.register(wuchatTool);
+			changed = true;
 			registered.set(id, {
 				dispose: () => registry.unregister(id)
 			});
@@ -37,26 +39,33 @@ export function registerMcpTools(registry: ToolRegistry, logger: Logger): vscode
 			if (!seen.has(id)) {
 				disposable.dispose();
 				registered.delete(id);
+				changed = true;
 			}
 		}
-		logger.info(`MCP bridge: ${registered.size} contributed tool(s) available.`);
+		if (changed) logger.info(`MCP bridge: ${registered.size} contributed tool(s) available.`);
 	};
 
+	registry.setToolRefresh(sync);
 	sync();
-	return vscode.lm.onDidChangeChatTools?.(() => sync()) ?? {
-		dispose: () => { /* provider without change events */ }
+	const extensionListener = vscode.extensions.onDidChange(sync);
+	return {
+		dispose: () => {
+			registry.setToolRefresh(undefined);
+			extensionListener.dispose();
+			for (const disposable of registered.values()) disposable.dispose();
+			registered.clear();
+		}
 	};
 }
 
 function wrapLanguageModelTool(tool: vscode.LanguageModelChatTool): WuchatTool {
-	const source = tool.tags?.includes('mcp') ? 'MCP server' : 'VS Code extension';
 	return {
 		id: MCP_PREFIX + tool.name,
 		name: tool.name,
-		description: `${tool.description} (provided by a ${source})`,
+		description: tool.description,
 		requiresApproval: true,
 		inputSchema: describeSchema(tool.inputSchema),
-		async invoke(rawInput: string, _ctx: WuchatToolInvocationContext): Promise<string> {
+		async invoke(rawInput: string): Promise<string> {
 			let parsed: unknown;
 			try {
 				parsed = JSON.parse(rawInput);
@@ -69,8 +78,8 @@ function wrapLanguageModelTool(tool: vscode.LanguageModelChatTool): WuchatTool {
 	};
 }
 
-function describeSchema(schema: { type: string | undefined }): string {
-	if (!schema?.type) return 'JSON object with the fields the tool expects';
+function describeSchema(schema: object | undefined): string {
+	if (!schema || !('type' in schema) || typeof schema.type !== 'string') return 'JSON object with the fields the tool expects';
 	return `Input matching JSON schema type "${schema.type}"`;
 }
 

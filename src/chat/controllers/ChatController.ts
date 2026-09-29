@@ -4,6 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import { randomUUID } from 'node:crypto';
+import { restoreAssistantContext } from '../../agents/Agent';
 import { AgentManager } from '../../agents/AgentManager';
 import { Logger } from '../../common/logger';
 import { AgentStep, ChatMessage, ChatRequest, LLMProvider, RequestContext, TodoItem, ToolProgress } from '../../common/types';
@@ -47,13 +49,17 @@ export class ChatController {
 			title: session.title,
 			updatedAt: session.updatedAt,
 			failed: Boolean(session.messages.at(-1)?.error),
-			running: session.running,
+			running: this.cancellations.has(session.id) || Boolean(session.running),
 			processId: session.processId
 		}));
 	}
 
 	get isBusy(): boolean {
 		return this.cancellations.size > 0;
+	}
+
+	isSessionBusy(id: string): boolean {
+		return this.cancellations.has(id);
 	}
 
 	/** Rough context size (tokens ≈ chars/4) the next request would carry. */
@@ -80,6 +86,11 @@ export class ChatController {
 		return true;
 	}
 
+	getStoredSession(id: string): ChatSession | undefined {
+		const stored = this.sessionStore.get(id);
+		return stored ? ChatSession.from(stored) : undefined;
+	}
+
 	/** Persists a session (used by forks before switching to them). */
 	async saveSession(session: ChatSession): Promise<void> {
 		await this.sessionStore.save(session.toStored());
@@ -100,7 +111,7 @@ export class ChatController {
 	/** Sends a user prompt through the configured agent and its selected provider/model. */
 	async send(
 		prompt: string,
-		options: { agentId?: string; context?: RequestContext },
+		options: { agentId?: string; context?: RequestContext; session?: ChatSession },
 		callbacks: StreamCallbacks
 	): Promise<void> {
 		const config = vscode.workspace.getConfiguration('wuchat');
@@ -109,7 +120,7 @@ export class ChatController {
 
 		const overrides = config.get<Record<string, { provider?: string; model?: string }>>('agents.modelOverrides', {});
 		const override = overrides[agent.id] ?? {};
-		const providerId = agent.provider ?? override.provider ?? config.get<string>('provider', 'claude-plan');
+		const providerId = agent.provider ?? override.provider ?? config.get<string>('provider', 'anthropic');
 		const modelId = agent.model ?? override.model ?? config.get<string>('model', '');
 
 		let provider: LLMProvider;
@@ -126,32 +137,34 @@ export class ChatController {
 			content: userContent,
 			...(options.context?.attachments.length ? { attachments: options.context.attachments.map(({ name, mimeType, uri }) => ({ name, mimeType, uri })) } : {})
 		};
-		this._session.append(userMessage);
+		const session = options.session ?? this._session;
+		session.append(userMessage);
 		callbacks.onUserMessage?.(userMessage);
 
 		const effort = config.get<string>('reasoningEffort', 'auto');
 		const supportedEfforts: Record<string, string[]> = {
-			'claude-plan': ['low', 'medium', 'high'],
+			'anthropic': ['low', 'medium', 'high'],
 			'openai-codex': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
 			'zai-glm': ['low', 'high', 'max']
 		};
 		const cancellation = new vscode.CancellationTokenSource();
-		this.cancellations.set('active', cancellation);
+		this.cancellations.set(session.id, cancellation);
 
 		const request: ChatRequest = {
-			requestId: `req-${Date.now()}`,
+			requestId: `req-${randomUUID()}`,
 			agent: agent.id,
 			prompt,
-			history: this._session.messages.slice(0, -1),
+			history: session.messages.slice(0, -1),
 			context: options.context ?? { attachments: [] },
 			tools: [],
 			...(supportedEfforts[providerId]?.includes(effort) ? { modelOptions: { reasoningEffort: effort } } : {}),
 			token: cancellation.token
 		};
 
-		callbacks.onAssistantStart?.(agent.name);
 		const started = Date.now();
 		try {
+			await this.sessionStore.save(session.toStored());
+			callbacks.onAssistantStart?.(agent.name);
 			const result = await agent.invoke(request, provider, modelId, {
 				onText: text => callbacks.onChunk?.(text),
 				onReasoning: text => callbacks.onReasoning?.(text),
@@ -171,7 +184,8 @@ export class ChatController {
 				provider: provider.id,
 				toolCalls: result.toolCalls.length ? result.toolCalls : undefined
 			};
-			this._session.append(assistantMessage);
+			session.append(assistantMessage);
+			if (this._session.id === session.id) this._session = session;
 			callbacks.onAssistantDone?.(assistantMessage);
 			this.logger.info(`Request ${request.requestId} finished in ${Date.now() - started}ms via ${provider.id}/${modelId || 'auto'}`);
 		} catch (err) {
@@ -179,15 +193,14 @@ export class ChatController {
 			this.logger.error('send failed', message);
 			callbacks.onError?.(`Wuchat: ${message}`);
 		} finally {
-			this.cancellations.delete('active');
-			await this.sessionStore.save(this._session.toStored());
+			this.cancellations.delete(session.id);
+			cancellation.dispose();
+			await this.sessionStore.save(session.toStored());
 		}
 	}
 
-	cancel(): void {
-		for (const cancellation of this.cancellations.values()) {
-			cancellation.cancel();
-		}
+	cancel(sessionId = this._session.id): void {
+		this.cancellations.get(sessionId)?.cancel();
 	}
 
 	/**
@@ -201,7 +214,7 @@ export class ChatController {
 		const agent = this.agentManager.get(agentId) ?? this.agentManager.defaultAgent;
 		const overrides = config.get<Record<string, { provider?: string; model?: string }>>('agents.modelOverrides', {});
 		const override = overrides[agent.id] ?? {};
-		const providerId = agent.provider ?? override.provider ?? config.get<string>('provider', 'claude-plan');
+		const providerId = agent.provider ?? override.provider ?? config.get<string>('provider', 'anthropic');
 		const modelId = agent.model ?? override.model ?? config.get<string>('model', '');
 		let provider: LLMProvider;
 		try {
@@ -215,10 +228,14 @@ export class ChatController {
 			callbacks.onSystemMessage?.('Wuchat: nothing to compact yet.');
 			return;
 		}
-		const transcript = messages
-			.map(message => `${message.role}: ${message.content.slice(0, 4_000)}`)
-			.join('\n\n')
-			.slice(0, 80_000);
+		const fullTranscript = messages
+			.map(message => `${message.role}: ${restoreAssistantContext(message).content.slice(0, 4_000)}`)
+			.join('\n\n');
+		const transcript = fullTranscript.length > 80_000
+			? `${fullTranscript.slice(0, 12_000)}\n\n[Older turns omitted]\n\n${fullTranscript.slice(-68_000)}`
+			: fullTranscript;
+		const latestTodos = [...messages].reverse().find(message => message.role === 'assistant' && message.todos?.length)?.todos;
+		const taskStatus = latestTodos?.map(item => `${item.status}: ${item.title}`).join('\n');
 		try {
 			callbacks.onSystemMessage?.('Wuchat: compacting conversation context…');
 			const token = new vscode.CancellationTokenSource().token;
@@ -227,7 +244,7 @@ export class ChatController {
 				requestId: `compact-${Date.now()}`,
 				agent: agent.id,
 				prompt: '',
-				history: [{ role: 'user', content: `Summarize the following conversation so an assistant can continue it without losing any relevant fact, decision, file path or pending task. Be concise and factual, in the language of the conversation. Do not answer the user, only summarize.\n\n${transcript}` }],
+				history: [{ role: 'user', content: `Summarize the following conversation so an assistant can continue it without losing any relevant fact, decision, file path or pending task. Be concise and factual, in the language of the conversation. Do not answer the user, only summarize.\n\n${transcript}${taskStatus ? `\n\nLatest saved task status:\n${taskStatus}` : ''}` }],
 				context: { attachments: [] },
 				tools: [],
 				token

@@ -40,6 +40,7 @@ export class ExtensionCliBridge implements vscode.Disposable {
 			void readFile(descriptorPath, 'utf8').then(contents => {
 				const descriptor = JSON.parse(contents) as { token?: string };
 				if (descriptor.token === this.token) return rm(descriptorPath, { force: true });
+				return undefined;
 			}).catch(() => undefined);
 		}
 	}
@@ -55,7 +56,7 @@ export class ExtensionCliBridge implements vscode.Disposable {
 		}
 		if (request.method === 'GET' && request.url === '/config') {
 			const config = vscode.workspace.getConfiguration('wuchat');
-			const providerId = config.get<string>('provider', 'claude-plan');
+			const providerId = config.get<string>('provider', 'anthropic');
 			const provider = this.providers.get(providerId);
 			if (!provider) {
 				response.writeHead(404).end(JSON.stringify({ error: `Provider ${providerId} is unavailable.` }));
@@ -67,7 +68,7 @@ export class ExtensionCliBridge implements vscode.Disposable {
 		}
 		if (request.method === 'GET' && request.url === '/models') {
 			const config = vscode.workspace.getConfiguration('wuchat');
-			const providerId = config.get<string>('provider', 'claude-plan');
+			const providerId = config.get<string>('provider', 'anthropic');
 			const provider = this.providers.get(providerId);
 			if (!provider?.models) {
 				response.writeHead(503).end(JSON.stringify({ error: `Provider ${providerId} does not expose a model list.` }));
@@ -111,7 +112,7 @@ export class ExtensionCliBridge implements vscode.Disposable {
 			return;
 		}
 		const config = vscode.workspace.getConfiguration('wuchat');
-		const providerId = config.get<string>('provider', 'claude-plan');
+		const providerId = config.get<string>('provider', 'anthropic');
 		const provider = this.providers.get(providerId);
 		const model = typeof payload.modelOverride === 'string' && payload.modelOverride
 			? payload.modelOverride

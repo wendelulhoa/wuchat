@@ -9,9 +9,11 @@ import { CancellationToken, WuchatTool, WuchatToolInvocationContext } from '../c
 export class ToolRegistry {
 	private readonly tools = new Map<string, WuchatTool>();
 	private sessionAutoApprove = false;
+	private refreshTools?: () => void;
 
 	setSessionAutoApprove(value: boolean): void { this.sessionAutoApprove = value; }
 	get isSessionAutoApproved(): boolean { return this.sessionAutoApprove; }
+	setToolRefresh(refresh?: () => void): void { this.refreshTools = refresh; }
 
 	register(tool: WuchatTool): void {
 		this.tools.set(tool.id, tool);
@@ -22,11 +24,12 @@ export class ToolRegistry {
 	}
 
 	get(id: string): WuchatTool | undefined {
+		this.refreshTools?.();
 		return this.tools.get(id);
 	}
 
 	getRequired(id: string): WuchatTool {
-		const tool = this.tools.get(id);
+		const tool = this.get(id);
 		if (!tool) {
 			throw new Error(`Wuchat: unknown tool "${id}".`);
 		}
@@ -34,6 +37,7 @@ export class ToolRegistry {
 	}
 
 	list(): WuchatTool[] {
+		this.refreshTools?.();
 		return [...this.tools.values()];
 	}
 

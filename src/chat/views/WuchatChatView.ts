@@ -22,18 +22,23 @@ const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
 const TEXT_EXTENSIONS = new Set(['.txt', '.md', '.mdx', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '.jsonc', '.yaml', '.yml', '.toml', '.xml', '.html', '.css', '.scss', '.py', '.java', '.kt', '.go', '.rs', '.c', '.h', '.cpp', '.cs', '.php', '.rb', '.sh', '.sql', '.log', '.env', '.ini']);
 const IMAGE_MIME_TYPES: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
 
+type StreamEvent = { type: string; text?: string; [key: string]: unknown };
+
 export class WuchatChatView implements vscode.WebviewViewProvider {
 	public static readonly viewId = 'wuchat.chatView';
 
 	private view?: vscode.WebviewView;
-	private streaming = false;
+	private readonly pendingEvents = new Map<string, StreamEvent[]>();
+	private get streaming(): boolean {
+		return this.pendingEvents.has(this.controller.session.id);
+	}
 	private readonly activeCliChildren = new Map<string, ChildProcess>();
 	private cliSessionPoll?: NodeJS.Timeout;
 	private attachments: ChatAttachment[] = [];
 	private transientError?: string;
 	private browserElement?: { description: string; screenshot: Uint8Array; url: string };
-	private lastRequest?: { text: string; agentId?: string; context: RequestContext };
-	private queue: Array<{ text: string; agentId?: string; steer: boolean }> = [];
+	private readonly lastRequests = new Map<string, { text: string; agentId?: string; context: RequestContext }>();
+	private readonly queues = new Map<string, Array<{ text: string; agentId?: string }>>();
 	/** Execution mode used by the next send; kept in memory so it never flips back mid-session. */
 	private executionMode: 'local' | 'cli' = 'local';
 	private readonly cliSessionVersions = new Map<string, number>();
@@ -75,7 +80,10 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 				break;
 			case 'send':
 				if (this.streaming) {
-					this.queue.push({ text: msg.text ?? '', agentId: msg.agentId, steer: false });
+					const sessionId = this.controller.session.id;
+					const queue = this.queues.get(sessionId) ?? [];
+					queue.push({ text: msg.text ?? '', agentId: msg.agentId });
+					this.queues.set(sessionId, queue);
 					await this.postQueue();
 					break;
 				}
@@ -88,15 +96,17 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 				break;
 			case 'queueSync':
 				// Reconcile the extension-side queue with the webview after edits.
-				this.queue = (msg.items ?? []).map(item => ({ text: item.text ?? '', agentId: msg.agentId, steer: false }));
+				this.queues.set(this.controller.session.id, (msg.items ?? []).map(item => ({ text: item.text ?? '', agentId: item.agentId })));
 				break;
 			case 'queueAction': {
-				if (msg.queueAction === 'clear') this.queue = [];
-				else if (msg.queueAction === 'remove' && typeof msg.queueIndex === 'number') this.queue.splice(msg.queueIndex, 1);
+				const queue = this.queues.get(this.controller.session.id) ?? [];
+				if (msg.queueAction === 'clear') queue.length = 0;
+				else if (msg.queueAction === 'remove' && typeof msg.queueIndex === 'number') queue.splice(msg.queueIndex, 1);
 				else if (msg.queueAction === 'sendNow' && typeof msg.queueIndex === 'number') {
-					const [item] = this.queue.splice(msg.queueIndex, 1);
+					const [item] = queue.splice(msg.queueIndex, 1);
 					if (item) await this.send(item.text, item.agentId);
 				}
+				this.queues.set(this.controller.session.id, queue);
 				await this.postQueue();
 				break;
 			}
@@ -128,7 +138,6 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			case 'clear':
 				this.attachments = [];
 				this.browserElement = undefined;
-				this.lastRequest = undefined;
 				this.toolRegistry.setSessionAutoApprove(false);
 				this.transientError = undefined;
 				this.controller.newSession();
@@ -142,7 +151,13 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 				break;
 			case 'deleteSession':
 				if (msg.sessionId) {
+					if (this.pendingEvents.has(msg.sessionId) || this.activeCliChildren.has(this.toCliSessionId(msg.sessionId))) {
+						void vscode.window.showInformationMessage('Wuchat: stop this chat before deleting it.');
+						break;
+					}
 					await this.controller.deleteSession(msg.sessionId);
+					this.queues.delete(msg.sessionId);
+					this.lastRequests.delete(msg.sessionId);
 					if (msg.sessionId.startsWith('cli-')) {
 						const sourceId = msg.sessionId.startsWith('cli-cli-') ? msg.sessionId.slice('cli-'.length) : msg.sessionId;
 						await rm(path.join(homedir(), '.wuchat', 'sessions', `${sourceId}.json`), { force: true }).catch(() => undefined);
@@ -157,6 +172,9 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			case 'openBrowser':
 				await this.browser.open();
 				break;
+			case 'openAgentTerminal':
+				await vscode.commands.executeCommand('wuchat.showAgentTerminal');
+				break;
 			case 'pickBrowserElement':
 				try { await this.browser.pickBrowserElement(); }
 				catch (error) { void vscode.window.showErrorMessage(`Wuchat: ${error instanceof Error ? error.message : String(error)}`); }
@@ -166,7 +184,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 				catch (error) { void vscode.window.showErrorMessage(`Wuchat: ${error instanceof Error ? error.message : String(error)}`); }
 				break;
 			case 'retry': {
-				const previous = this.lastRequest;
+				const previous = this.lastRequests.get(this.controller.session.id);
 				await this.send(previous?.text ?? this.controller.session.lastUserMessage, previous?.agentId, previous?.context);
 				break;
 			}
@@ -204,7 +222,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 				break;
 			case 'setModel': {
 				const config = vscode.workspace.getConfiguration('wuchat');
-				const providerId = msg.model?.provider ?? config.get<string>('provider', 'claude-plan');
+				const providerId = msg.model?.provider ?? config.get<string>('provider', 'anthropic');
 				await config.update('provider', providerId, vscode.ConfigurationTarget.Global);
 				await config.update('model', msg.model?.id ?? '', vscode.ConfigurationTarget.Global);
 				await config.update('reasoningEffort', 'auto', vscode.ConfigurationTarget.Global);
@@ -346,17 +364,32 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 		if (!this.streaming) await this.postState();
 	}
 
-	async send(text: string, agentId?: string, retryContext?: RequestContext): Promise<void> {
-		if (!text.trim() || this.streaming || !this.view) {
+	async send(text: string, agentId?: string, retryContext?: RequestContext, targetSession = this.controller.session, mode = this.executionMode): Promise<void> {
+		if (!text.trim() || this.pendingEvents.has(targetSession.id) || !this.view) {
 			return;
 		}
-		this.streaming = true;
-		this.transientError = undefined;
-		const post = (message: unknown) => void this.view?.webview.postMessage(message);
+		let session = targetSession;
+		if (mode === 'cli' && !session.id.startsWith('cli-')) {
+			session = ChatSession.from({ ...session.toStored(), id: this.toCliSessionId(session.id) });
+			if (this.controller.session.id === targetSession.id) this.controller.setSession(session);
+		}
+		const sessionId = session.id;
+		this.pendingEvents.set(sessionId, []);
+		if (this.controller.session.id === sessionId) this.transientError = undefined;
+		const post = (message: StreamEvent) => {
+			const events = this.pendingEvents.get(sessionId);
+			if (events && ['assistantStart', 'assistantChunk', 'assistantReasoning', 'toolCall', 'plan', 'todos', 'system'].includes(message.type)) {
+				const last = events.at(-1);
+				if (last?.type === message.type && (message.type === 'assistantChunk' || message.type === 'assistantReasoning')) last.text = (last.text ?? '') + (message.text ?? '');
+				else events.push({ ...message });
+			}
+			if (this.controller.session.id === sessionId) void this.view?.webview.postMessage(message);
+		};
 		post({ type: 'clearError' });
-		const context: RequestContext = retryContext ?? { attachments: this.attachments.splice(0) };
-		if (!retryContext) post({ type: 'clearComposerAttachments' });
-		if (!retryContext) {
+		const selected = this.controller.session.id === sessionId;
+		const context: RequestContext = retryContext ?? { attachments: selected ? this.attachments.splice(0) : [] };
+		if (!retryContext && selected) post({ type: 'clearComposerAttachments' });
+		if (!retryContext && selected) {
 			const selection = getActiveSelection();
 			if (selection) context.selection = selection;
 			if (this.browserElement) {
@@ -366,17 +399,20 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			}
 			this.browserElement = undefined;
 		}
-		this.lastRequest = { text, agentId, context };
+		if (selected) this.lastRequests.set(sessionId, { text, agentId, context });
 
 		post({ type: 'streamStart' });
 		try {
-			if (this.executionMode === 'cli') {
-				await this.sendViaCli(text, context);
+			if (mode === 'cli') {
+				await this.sendViaCli(text, context, session, post);
 				return;
 			}
-			await this.controller.send(text, { agentId, context }, {
+			await this.controller.send(text, { agentId, context, session }, {
 				onUserMessage: message => post({ type: 'userMessage', message }),
-				onAssistantStart: agent => post({ type: 'assistantStart', agent, executionMode: 'local' }),
+				onAssistantStart: agent => {
+					post({ type: 'assistantStart', agent, executionMode: 'local' });
+					void this.view?.webview.postMessage({ type: 'sessions', sessions: this.controller.sessionSummaries });
+				},
 				onChunk: chunk => post({ type: 'assistantChunk', text: chunk }),
 				onReasoning: chunk => post({ type: 'assistantReasoning', text: chunk }),
 				onToolCall: progress => post({ type: 'toolCall', ...progress }),
@@ -384,13 +420,14 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 				onTodos: todos => post({ type: 'todos', todos }),
 				onAssistantDone: message => post({ type: 'assistantDone', message, executionMode: 'local' }),
 				onSystemMessage: text => post({ type: 'system', text }),
-				onError: text => { this.transientError = text; post({ type: 'error', text }); }
+				onError: text => { if (this.controller.session.id === sessionId) this.transientError = text; post({ type: 'error', text }); }
 			});
 		} finally {
-			this.streaming = false;
+			this.pendingEvents.delete(sessionId);
 			post({ type: 'streamEnd' });
-			await this.postState();
-			await this.drainQueue();
+			if (this.controller.session.id === sessionId) await this.postState();
+			else void this.view?.webview.postMessage({ type: 'sessions', sessions: this.controller.sessionSummaries });
+			await this.drainQueue(session, mode);
 		}
 	}
 
@@ -399,27 +436,14 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 	 * streaming its output back into the chat. The CLI keeps the authoritative
 	 * transcript under ~/.wuchat/sessions (prefixed cli- here on import).
 	 */
-	private async sendViaCli(text: string, context: RequestContext): Promise<void> {
-		const sessionId = this.toCliSessionId(this.controller.session.id);
-		const post = (message: unknown) => {
-			if (this.toCliSessionId(this.controller.session.id) === sessionId) void this.view?.webview.postMessage(message);
-		};
+	private async sendViaCli(text: string, context: RequestContext, session: ChatSession, post: (message: StreamEvent) => void): Promise<void> {
+		const sessionId = session.id;
 		const executable = process.platform === 'win32' ? 'wuchat' : path.join(homedir(), '.local', 'bin', 'wuchat');
 		const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 		if (this.activeCliChildren.has(sessionId)) {
 			this.transientError = 'This chat already has a CLI process running. Start a new chat to run another task concurrently.';
 			post({ type: 'error', text: this.transientError });
 			return;
-		}
-		if (this.controller.session.id !== sessionId) {
-			const previous = this.controller.session;
-			this.controller.setSession(ChatSession.from({
-				id: sessionId,
-				title: previous.title,
-				createdAt: previous.createdAt,
-				updatedAt: previous.updatedAt,
-				messages: previous.messages
-			}));
 		}
 		const contextDir = path.join(homedir(), '.wuchat', 'contexts');
 		const contextFile = path.join(contextDir, `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
@@ -436,25 +460,26 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			}))
 		}), { mode: 0o600 });
 		post({ type: 'userMessage', message: { role: 'user', content: text } });
-		this.controller.session.append({ role: 'user', content: text });
+		session.append({ role: 'user', content: text });
 		post({ type: 'assistantStart', agent: 'CLI Agent', executionMode: 'cli' });
 		const child = spawn(executable, ['--session', sessionId, '--agent', '--yes', '--prompt', text, '--context-file', contextFile], { cwd: workspace, detached: true });
 		this.activeCliChildren.set(sessionId, child);
-		this.controller.session.running = true;
-		this.controller.session.processId = child.pid;
-		await this.controller.saveSession(this.controller.session);
+		session.running = true;
+		session.processId = child.pid;
+		await this.controller.saveSession(session);
+		void this.view?.webview.postMessage({ type: 'sessions', sessions: this.controller.sessionSummaries });
 		if (!this.cliSessionPoll) {
 			this.cliSessionPoll = setInterval(() => { void this.refreshCliSessionList(); }, 2_000);
 		}
-		{
+		await new Promise<void>(resolve => {
 			let assistantText = '';
 			let stderrBuffer = '';
+			let failedToStart = false;
 			let timeout: ReturnType<typeof setTimeout>;
 			const resetWatchdog = () => {
 				clearTimeout(timeout);
 				timeout = setTimeout(() => {
-				this.transientError = 'Wuchat CLI did not finish within 10 minutes; the request was aborted.';
-				post({ type: 'error', text: this.transientError });
+				post({ type: 'error', text: 'Wuchat CLI did not finish within 10 minutes; the request was aborted.' });
 				child.kill();
 				}, 10 * 60_000);
 			};
@@ -473,20 +498,25 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 				for (const line of lines) this.handleCliStderrLine(line, post);
 			});
 			child.on('error', (error: Error) => {
+				failedToStart = true;
 				clearTimeout(timeout);
 				void rm(contextFile, { force: true });
 				if (this.activeCliChildren.get(sessionId) === child) this.activeCliChildren.delete(sessionId);
-				this.controller.session.running = false;
-				this.controller.session.processId = undefined;
+				session.running = false;
+				session.processId = undefined;
 				const message = error instanceof Error ? error.message : String(error);
-				this.transientError = `Wuchat CLI is not installed or not reachable: ${message}`;
-				this.controller.session.append({ role: 'assistant', content: this.transientError, agent: 'CLI Agent', error: this.transientError });
-				void this.controller.saveSession(this.controller.session);
-				post({ type: 'error', text: this.transientError });
+				const errorText = `Wuchat CLI is not installed or not reachable: ${message}`;
+				session.append({ role: 'assistant', content: errorText, agent: 'CLI Agent', error: errorText });
+				void this.controller.saveSession(session);
+				post({ type: 'error', text: errorText });
 				void this.refreshCliSessionList();
+				resolve();
 			});
 			child.on('close', (_code, signal) => {
 				clearTimeout(timeout);
+				if (failedToStart) return;
+				session.running = false;
+				session.processId = undefined;
 				if (stderrBuffer) this.handleCliStderrLine(stderrBuffer, post);
 				if (this.activeCliChildren.get(sessionId) === child) this.activeCliChildren.delete(sessionId);
 				if (this.activeCliChildren.size === 0 && this.cliSessionPoll) {
@@ -494,34 +524,24 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 					this.cliSessionPoll = undefined;
 				}
 				post({ type: 'assistantDone', message: { role: 'assistant', content: assistantText.trim(), agent: 'CLI Agent', ...(signal ? { error: 'CLI process interrupted' } : {}) }, executionMode: 'cli' });
-				if (this.toCliSessionId(this.controller.session.id) === sessionId) {
-					void this.syncCliSessions().then(async () => {
-						await this.controller.loadSession(sessionId);
-						await this.postState();
-					});
-				}
-				else void this.refreshCliSessionList();
+				void this.syncCliSessions().then(async () => {
+					if (this.controller.session.id === sessionId) await this.controller.loadSession(sessionId);
+				}).catch(error => this.logger.warn('Could not sync completed CLI session.', error)).finally(resolve);
 			});
-		}
+		});
 	}
 
 	private async refreshCliSessionList(): Promise<void> {
 		if (!this.view) return;
 		await this.syncCliSessions();
-		const currentId = this.controller.session.id;
-		if (currentId.startsWith('cli-') && this.controller.session.running) {
-			await this.controller.loadSession(currentId);
-			await this.postState();
-			return;
-		}
 		await this.view.webview.postMessage({ type: 'sessions', sessions: this.controller.sessionSummaries });
 	}
 
-	private handleCliStderrLine(line: string, post: (message: unknown) => void): void {
+	private handleCliStderrLine(line: string, post: (message: StreamEvent) => void): void {
 		const eventPrefix = '\x1eWUCHAT:';
 		if (line.startsWith(eventPrefix)) {
 			try {
-				const event = JSON.parse(line.slice(eventPrefix.length)) as { type?: string };
+				const event = JSON.parse(line.slice(eventPrefix.length)) as StreamEvent;
 				if (event.type === 'toolCall' || event.type === 'plan' || event.type === 'todos' || event.type === 'system' || event.type === 'assistantReasoning') post(event);
 			} catch (error) {
 				this.logger.warn('Could not parse CLI progress event.', error);
@@ -530,22 +550,23 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 		}
 		const errorText = line.trim();
 		if (errorText) {
-			this.transientError = errorText;
 			post({ type: 'error', text: errorText });
 		}
 	}
 
 	/** Sends queued messages one by one after the current turn ends. */
-	private async drainQueue(): Promise<void> {
-		if (this.streaming || this.queue.length === 0 || !this.view) return;
-		const next = this.queue.shift()!;
+	private async drainQueue(session: ChatSession, mode: 'local' | 'cli'): Promise<void> {
+		const queue = this.queues.get(session.id);
+		if (this.pendingEvents.has(session.id) || !queue?.length || !this.view) return;
+		const next = queue.shift()!;
 		await this.postQueue();
-		await this.send(next.text, next.agentId);
+		const nextSession = mode === 'cli' ? this.controller.getStoredSession(session.id) ?? session : session;
+		await this.send(next.text, next.agentId, undefined, nextSession, mode);
 	}
 
 	private async postQueue(): Promise<void> {
 		if (!this.view) return;
-		await this.view.webview.postMessage({ type: 'queue', items: this.queue.map(item => ({ text: item.text })) });
+		await this.view.webview.postMessage({ type: 'queue', items: this.queues.get(this.controller.session.id) ?? [] });
 	}
 
 	/** Shows an informational line in the chat (e.g. compaction progress). */
@@ -580,7 +601,9 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			messages: this.controller.session.messages,
 			sessions: this.controller.sessionSummaries,
 			currentSessionId: this.controller.session.id,
-			running: this.activeCliChildren.has(this.toCliSessionId(this.controller.session.id)) || Boolean(this.controller.session.running),
+			running: this.streaming || this.activeCliChildren.has(this.toCliSessionId(this.controller.session.id)) || Boolean(this.controller.session.running),
+			pendingEvents: this.pendingEvents.get(this.controller.session.id) ?? [],
+			queue: this.queues.get(this.controller.session.id) ?? [],
 			contextEstimate: this.controller.contextEstimate,
 			workspaceName: vscode.workspace.workspaceFolders?.[0]?.name ?? 'No workspace',
 			autoApproveTools: config.get<boolean>('autoApproveTools', false),
@@ -588,7 +611,7 @@ export class WuchatChatView implements vscode.WebviewViewProvider {
 			approvalMode: config.get<boolean>('autoApproveTools', false) ? 'configured' : this.toolRegistry.isSessionAutoApproved ? 'session' : 'ask',
 			agents: this.agentManager.list().map(agent => ({ id: agent.id, name: agent.name, description: agent.description })),
 			modelGroups,
-			provider: config.get<string>('provider', 'claude-plan'),
+			provider: config.get<string>('provider', 'anthropic'),
 			model: config.get<string>('model', ''),
 			effort: config.get<string>('reasoningEffort', 'auto'),
 			executionMode: this.executionMode,

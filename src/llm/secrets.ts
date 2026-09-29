@@ -22,6 +22,19 @@ export class SecretManager {
 	async deleteApiKey(providerId: string): Promise<void> {
 		await this.secrets.delete(KEY_PREFIX + providerId);
 	}
+
+	/** Generic named-secret storage used by OAuth sessions. */
+	async setSecret(key: string, value: string): Promise<void> {
+		await this.secrets.store(key, value);
+	}
+
+	async getSecret(key: string): Promise<string | undefined> {
+		return this.secrets.get(key);
+	}
+
+	async deleteSecret(key: string): Promise<void> {
+		await this.secrets.delete(key);
+	}
 }
 
 /** Prompts for and stores the API key of the given provider. */

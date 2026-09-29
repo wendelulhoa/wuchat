@@ -3,7 +3,6 @@ import {
 	ChatMessage,
 	ChatRequest,
 	LLMProvider,
-	ModelInfo,
 	ToolCallRequest
 } from '../common/types';
 import { readFile } from 'node:fs/promises';

@@ -38,7 +38,7 @@ let hasAvailableModel = false;
 function post(message) { vscodeApi.postMessage(message); }
 
 const effortLevels = {
-	'claude-plan': ['low', 'medium', 'high'],
+	'anthropic': ['low', 'medium', 'high'],
 	'openai-codex': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
 	'zai-glm': ['low', 'high', 'max'],
 	echo: []
@@ -60,7 +60,7 @@ function syncSelectors(state) {
 		return option;
 	}), currentAgentId);
 
-	const provider = state.provider || 'claude-plan';
+	const provider = state.provider || 'anthropic';
 	const providerName = (state.modelGroups ?? []).find(group => group.id === provider)?.name || provider;
 	const auto = document.createElement('option');
 	auto.value = 'auto';
@@ -196,6 +196,17 @@ function addActivityStep(activity, step) {
 		steps.appendChild(row);
 	}
 	row.querySelector('.activity-label').textContent = step.label;
+	if (step.tool === 'wuchat.runCommand') {
+		let action = row.querySelector('.activity-terminal');
+		if (!action) {
+			action = document.createElement('button');
+			action.className = 'activity-terminal';
+			action.setAttribute('aria-haspopup', 'true');
+			action.textContent = 'Open terminal';
+			action.addEventListener('click', () => post({ type: 'openAgentTerminal' }));
+			row.querySelector('.activity-step-header').appendChild(action);
+		}
+	}
 	return row;
 }
 
@@ -228,6 +239,10 @@ function updateActivityStep(activity, progress) {
 			row.appendChild(result);
 		}
 		result.querySelector('pre').textContent = String(progress.output).slice(0, 2000);
+		if (progress.tool === 'wuchat.runCommand') {
+			result.querySelector('summary').textContent = 'Command output';
+			result.open = true;
+		}
 	}
 	updateActivitySummary(activity);
 }
@@ -422,6 +437,7 @@ function addMessageElement(message, messageIndex = -1) {
 			updateActivityStep(activity, {
 				id: step?.id ?? call.id ?? `call-${index}`,
 				label: step?.label ?? call.tool,
+				tool: call.tool,
 				status: call.status ?? 'finished',
 				output: call.output
 			});
@@ -690,7 +706,7 @@ modelSelect.addEventListener('change', () => {
 	post({ type: 'setModel', model });
 });
 effortSelect.addEventListener('change', () => post({ type: 'setEffort', effort: effortSelect.value }));
-sendBtn.addEventListener('click', sendPrompt);
+sendBtn.addEventListener('click', () => sendPrompt());
 stopBtn.addEventListener('click', () => post({ type: 'stop' }));
 inputEl.addEventListener('input', updateComposer);
 inputEl.addEventListener('keydown', event => {
@@ -787,9 +803,11 @@ window.addEventListener('message', event => {
 	switch (message.type) {
 		case 'ready':
 		case 'state': {
+				const previousSessionId = currentSessionId;
 			syncSelectors(message);
 			sessions = message.sessions ?? [];
 			currentSessionId = message.currentSessionId ?? '';
+				if (previousSessionId !== currentSessionId) document.getElementById('wuchat-pending')?.remove();
 			renderSessions();
 			document.getElementById('wuchat-workspace-label').textContent = message.workspaceName || 'No workspace';
 			document.getElementById('wuchat-approval-mode').value = message.approvalMode || 'ask';
@@ -821,7 +839,15 @@ window.addEventListener('message', event => {
 				attachmentsEl.appendChild(tag);
 			}
 			renderMessages(message.messages ?? []);
-			if (!busy) setBusy(Boolean(message.running));
+			queued = message.queue ?? [];
+			renderQueue();
+			if (message.running && !document.getElementById('wuchat-pending')) {
+				const events = message.pendingEvents?.length
+					? message.pendingEvents
+					: [{ type: 'assistantStart', agent: 'Agent', executionMode: message.executionMode }];
+				for (const entry of events) window.dispatchEvent(new MessageEvent('message', { data: entry }));
+			}
+			setBusy(Boolean(message.running));
 			const meter = document.getElementById('wuchat-context-meter');
 			if (meter && message.contextEstimate) {
 				meter.textContent = `${message.contextEstimate.tokens.toLocaleString()} tokens · ${message.contextEstimate.messages} msg`;
@@ -834,6 +860,10 @@ window.addEventListener('message', event => {
 			sessions = message.sessions ?? sessions;
 			renderSessions();
 			break;
+		case 'queue':
+			queued = message.items ?? [];
+			renderQueue();
+			break;
 		case 'clearError':
 			messagesEl.querySelector('.msg-transient-error')?.remove();
 			break;
@@ -845,13 +875,6 @@ window.addEventListener('message', event => {
 			break;
 		case 'streamEnd':
 			setBusy(false);
-			if (queued.length) {
-				const next = queued.shift();
-				renderQueue();
-				post({ type: 'queueSync', items: queued });
-				setBusy(true);
-				post({ type: 'send', text: next.text, agentId: next.agentId });
-			}
 			break;
 		case 'userMessage':
 			addMessageElement(message.message);
@@ -947,6 +970,7 @@ window.addEventListener('message', event => {
 					updateActivityStep(activity, {
 						id: message.id ?? legacyStep?.dataset.stepId ?? message.tool,
 						label: message.label ?? legacyStep?.querySelector('.activity-label')?.textContent ?? message.tool,
+						tool: message.tool,
 						status: message.status,
 						output: message.output
 					});

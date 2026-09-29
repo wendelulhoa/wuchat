@@ -4,15 +4,16 @@
 
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { readdir, readFile } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
 import { AgentManager } from '../agents/AgentManager';
 import { ChatController } from '../chat/controllers/ChatController';
 import { WuchatChatView } from '../chat/views/WuchatChatView';
 import { SessionStore, StoredSession } from '../chat/history/SessionStore';
+import { showWuchatTerminal } from '../vscode/workspaceBridge';
 import { Logger } from '../common/logger';
 import { ProviderRegistry } from '../llm/ProviderRegistry';
+import { SecretManager, configureApiKey } from '../llm/secrets';
 
 export interface CommandDeps {
 	controller: ChatController;
@@ -21,10 +22,11 @@ export interface CommandDeps {
 	chatView: WuchatChatView;
 	sessionStore: SessionStore;
 	logger: Logger;
+	secrets: vscode.SecretStorage;
 }
 
 export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
-	const { controller, agentManager, providerRegistry, chatView, sessionStore, logger } = deps;
+	const { controller, agentManager, providerRegistry, chatView, sessionStore, logger, secrets } = deps;
 
 	async function revealChat(): Promise<void> {
 		await vscode.commands.executeCommand('wuchat.chatView.focus');
@@ -58,7 +60,7 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
 
 	async function chooseModel(): Promise<string | undefined> {
 		const config = vscode.workspace.getConfiguration('wuchat');
-		const providerId = config.get<string>('provider', 'claude-plan');
+		const providerId = config.get<string>('provider', 'anthropic');
 		const provider = providerRegistry.get(providerId);
 		const models = provider?.models ? await provider.models() : [];
 		if (!models.length) {
@@ -78,8 +80,8 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
 		if (!selectedId) {
 			const pick = await vscode.window.showQuickPick(
 				candidates.map(provider => ({
-					label: provider.id === 'zai-glm' ? `$(key) ${provider.name} · API key` : `$(key) ${provider.name} · Sign in`,
-					description: provider.id === 'claude-plan' ? 'Claude.ai account' : provider.id === 'openai-codex' ? 'ChatGPT account' : 'Z.AI Coding Plan',
+					label: `$(key) ${provider.name}`,
+					description: provider.id === 'zai-glm' ? 'API key' : provider.id === 'echo' ? 'Offline' : 'Account sign-in',
 					providerId: provider.id
 				})),
 				{ title: 'Connect an AI provider', placeHolder: 'Choose a provider to sign in or add its API key' }
@@ -103,23 +105,22 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
 			vscode.window.showInformationMessage('Wuchat Echo works offline and does not need sign-in.');
 			return;
 		}
-		const providerCommands = provider as typeof provider & { connectCommand?: string; managementCommand?: string };
-		const command = providerCommands.connectCommand ?? providerCommands.managementCommand;
-		if (!command || !(await vscode.commands.getCommands(true)).includes(command)) {
-			vscode.window.showWarningMessage('Install and enable the Claude Plan + Codex provider extension to connect this account.');
+		// GLM uses a direct API key; Claude and Codex use OAuth account sign-in.
+		if (provider.id === 'zai-glm') {
+			await configureApiKey(new SecretManager(secrets), provider.id);
+			await chatView.refresh();
 			return;
 		}
-		try {
-			await vscode.commands.executeCommand(command);
+		if (provider.id === 'anthropic' || provider.id === 'openai-codex') {
+			await vscode.commands.executeCommand('wuchat.connectOAuth', provider.id === 'anthropic' ? 'claude' : 'codex');
 			await chatView.refresh();
-		} catch (error) {
-			logger.warn(`Provider connection command failed (${selectedId})`, error);
-			vscode.window.showErrorMessage(`Could not open ${provider.name} sign-in. Make sure its provider extension is installed and enabled.`);
+			return;
 		}
+		await chatView.refresh();
 	}
 
 	async function manageCurrentProvider(): Promise<void> {
-		const id = vscode.workspace.getConfiguration('wuchat').get<string>('provider', 'claude-plan');
+		const id = vscode.workspace.getConfiguration('wuchat').get<string>('provider', 'anthropic');
 		const provider = providerRegistry.get(id);
 		const command = provider && 'managementCommand' in provider
 			? String((provider as { managementCommand: string }).managementCommand)
@@ -134,7 +135,7 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
 
 	async function openChatSettings(): Promise<void> {
 		const config = vscode.workspace.getConfiguration('wuchat');
-		const providerId = config.get<string>('provider', 'claude-plan');
+		const providerId = config.get<string>('provider', 'anthropic');
 		const provider = providerRegistry.get(providerId);
 		const agentId = config.get<string>('defaultAgent', 'wuchat.ask');
 		const agent = agentManager.get(agentId);
@@ -176,7 +177,7 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
 	}
 
 	async function testCurrentProvider(providerOverride?: string): Promise<void> {
-		const id = providerOverride ?? vscode.workspace.getConfiguration('wuchat').get<string>('provider', 'claude-plan');
+		const id = providerOverride ?? vscode.workspace.getConfiguration('wuchat').get<string>('provider', 'anthropic');
 		const provider = providerRegistry.get(id) as (ReturnType<ProviderRegistry['get']> & { testConnectionCommand?: string }) | undefined;
 		if (!provider || !provider.testConnectionCommand || !(await vscode.commands.getCommands(true)).includes(provider.testConnectionCommand)) {
 			vscode.window.showWarningMessage(`Connection test for ${provider?.name ?? id} is unavailable. Install and enable the provider extension.`);
@@ -228,7 +229,6 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
 				}
 				const id = `cli-${raw.id ?? file.replace(/\.json$/, '')}`;
 				const updatedAt = raw.updatedAt ? Date.parse(raw.updatedAt) : Date.now();
-				const source = path.basename(raw.workspace ?? 'workspace');
 				await sessionStore.save({
 					id,
 					title: `[CLI] ${raw.messages.find(m => m.role === 'user')?.content.slice(0, 36) || id}`,
@@ -257,6 +257,7 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
 			await chatView.refresh();
 		}),
 		vscode.commands.registerCommand('wuchat.cancelGeneration', () => controller.cancel()),
+		vscode.commands.registerCommand('wuchat.showAgentTerminal', () => showWuchatTerminal()),
 		vscode.commands.registerCommand('wuchat.selectAgent', async () => {
 			const agentId = await chooseAgent();
 			if (agentId) {

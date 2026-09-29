@@ -10,7 +10,11 @@ import { WuchatChatView } from './chat/views/WuchatChatView';
 import { Logger } from './common/logger';
 import { ProviderRegistry } from './llm/ProviderRegistry';
 import { EchoProvider } from './llm/providers/echoProvider';
-import { VSCodeLmProvider } from './llm/providers/vscodeLmProvider';
+import { AnthropicProvider } from './llm/providers/anthropicProvider';
+import { CodexProvider } from './llm/providers/codexProvider';
+import { GlmProvider } from './llm/providers/glmProvider';
+import { SecretManager, configureApiKey } from './llm/secrets';
+import { createAuthorizationUrl, completeSignIn, importClaudeCliSession, importCodexCliSession, clearOAuthSession, readOAuthSession, startBrowserSignIn } from './llm/oauth';
 import { ToolRegistry } from './tools/ToolRegistry';
 import { defaultTools } from './tools/implementations/defaultTools';
 import { registerMcpTools } from './tools/mcpBridge';
@@ -27,30 +31,78 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	const providerRegistry = new ProviderRegistry();
 	providerRegistry.register(new EchoProvider());
-	providerRegistry.register(new VSCodeLmProvider({
-		id: 'claude-plan',
-		name: 'Claude Plan',
-		managementCommand: 'claudePlan.manage',
-		connectCommand: 'claudePlan.login',
-		testConnectionCommand: 'claudePlan.testConnection'
+	const secretManager = new SecretManager(context.secrets);
+	// Direct providers: Claude (claude.ai OAuth), ChatGPT Codex (ChatGPT OAuth)
+	// and Z.AI GLM (API key) sign in inside Wuchat — no companion extension.
+	const promptOAuthSignIn = async (vendor: 'claude' | 'codex'): Promise<void> => {
+		const label = vendor === 'claude' ? 'Claude' : 'ChatGPT Codex';
+		try {
+			if (vendor === 'codex') {
+				// Automatic flow: the browser redirects to a local server, no pasting.
+				const signIn = startBrowserSignIn(secretManager, vendor, url => Promise.resolve(vscode.env.openExternal(vscode.Uri.parse(url))));
+				void signIn.completion.then(async session => {
+					vscode.window.showInformationMessage(`Wuchat: signed in to ChatGPT Codex.`);
+					void session;
+					await chatView.refresh();
+				}).catch(error => vscode.window.showErrorMessage(`Wuchat: Codex sign-in failed: ${error instanceof Error ? error.message : String(error)}`));
+				return;
+			}
+			const { url, pkce } = createAuthorizationUrl(vendor);
+			await vscode.env.openExternal(vscode.Uri.parse(url));
+			const callback = await vscode.window.showInputBox({
+				title: `Wuchat: ${label} sign-in`,
+				prompt: 'Paste the code from the browser (the CODE#STATE value shown on the callback page), or press Escape to cancel.',
+				ignoreFocusOut: true
+			});
+			if (!callback) return;
+			const session = await completeSignIn(secretManager, vendor, callback, pkce);
+			vscode.window.showInformationMessage(`Wuchat: signed in to ${label}${session.email ? ` as ${session.email}` : ''}.`);
+			await chatView.refresh();
+		} catch (error) {
+			vscode.window.showErrorMessage(`Wuchat: ${label} sign-in failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	};
+	const importCliLogin = async (vendor: 'claude' | 'codex'): Promise<boolean> =>
+		vendor === 'claude' ? importClaudeCliSession(secretManager) : importCodexCliSession(secretManager);
+	context.subscriptions.push(vscode.commands.registerCommand('wuchat.connectOAuth', (vendor?: 'claude' | 'codex') =>
+		promptOAuthSignIn(vendor ?? 'claude')));
+	context.subscriptions.push(vscode.commands.registerCommand('wuchat.importCliLogin', async () => {
+		const pick = await vscode.window.showQuickPick([
+			{ label: '$(cloud-upload) Import Claude CLI login (~/.claude)', vendor: 'claude' as const },
+			{ label: '$(cloud-upload) Import Codex CLI login (~/.codex)', vendor: 'codex' as const }
+		], { title: 'Import an existing CLI sign-in' });
+		if (!pick) return;
+		const ok = await importCliLogin(pick.vendor);
+		vscode.window.showInformationMessage(ok ? 'Wuchat: CLI login imported.' : `Wuchat: no ${pick.vendor === 'claude' ? 'Claude' : 'Codex'} CLI credentials found.`);
+		if (ok) await chatView.refresh();
+	}));
+	context.subscriptions.push(vscode.commands.registerCommand('wuchat.signOut', async (vendor?: 'claude' | 'codex') => {
+		const target = vendor ?? (await vscode.window.showQuickPick([
+			{ label: 'Claude', vendor: 'claude' as const },
+			{ label: 'ChatGPT Codex', vendor: 'codex' as const }
+		], { title: 'Sign out of which account?' }))?.vendor;
+		if (!target) return;
+		await clearOAuthSession(secretManager, target);
+		const connected = await readOAuthSession(secretManager, target);
+		void connected;
+		vscode.window.showInformationMessage('Wuchat: signed out.');
+		await chatView.refresh();
+	}));
+	providerRegistry.register(new AnthropicProvider({
+		secretManager,
+		onMissingCredentials: () => promptOAuthSignIn('claude')
+	}));
+	providerRegistry.register(new CodexProvider({
+		secretManager,
+		onMissingCredentials: () => promptOAuthSignIn('codex')
+	}));
+	providerRegistry.register(new GlmProvider({
+		secretManager,
+		onMissingCredentials: () => configureApiKey(secretManager, 'zai-glm')
 	}));
 	const cliBridge = new ExtensionCliBridge(providerRegistry, logger);
 	context.subscriptions.push(cliBridge);
 	void cliBridge.start().catch(error => logger.warn('Could not start the connected CLI provider bridge.', error));
-	providerRegistry.register(new VSCodeLmProvider({
-		id: 'openai-codex',
-		name: 'ChatGPT Codex',
-		managementCommand: 'openaiCodex.manage',
-		connectCommand: 'openaiCodex.login',
-		testConnectionCommand: 'openaiCodex.testConnection'
-	}));
-	providerRegistry.register(new VSCodeLmProvider({
-		id: 'zai-glm',
-		name: 'Z.AI GLM',
-		managementCommand: 'zaiGlm.manage',
-		connectCommand: 'zaiGlm.setApiKey',
-		testConnectionCommand: 'zaiGlm.testConnection'
-	}));
 
 	const browser = new WuchatBrowser();
 	context.subscriptions.push(browser);
@@ -112,7 +164,8 @@ export function activate(context: vscode.ExtensionContext): void {
 		providerRegistry,
 		chatView,
 		sessionStore,
-		logger
+		logger,
+		secrets: context.secrets
 	}));
 	context.subscriptions.push(...registerVsCodeChatBridge(controller, agentManager, logger, () => { void chatView.refresh(); }));
 

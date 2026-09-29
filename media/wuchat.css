@@ -200,6 +200,8 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
 .activity-step[data-status="queued"] .activity-label, .activity-step[data-status="finished"] .activity-label { color: var(--wc-muted); }
 .activity-status { flex: none; color: var(--wc-muted); font-size: 10px; }
 .activity-step[data-status="failed"] .activity-status, .activity-step[data-status="rejected"] .activity-status { color: var(--vscode-errorForeground, #d65c64); }
+.activity-terminal { flex: none; margin-left: auto; padding: 1px 7px; font-size: 10px; color: var(--vscode-textLink-foreground, var(--wc-accent)); background: transparent; border: 1px solid var(--wc-border); border-radius: 3px; cursor: pointer; }
+.activity-terminal:hover { background: var(--wc-border); }
 .activity-result { margin-top: 4px; }
 .activity-result summary { display: list-item; width: fit-content; color: var(--vscode-textLink-foreground, var(--wc-accent)); font-size: 10px; }
 .activity-result pre { margin: 6px 0 0; padding: 7px 9px; max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; }

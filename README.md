@@ -4,6 +4,8 @@ Wuchat is a compact, independent chat experience inside VS Code. The chat compos
 
 During a response, **Thinking** shows only reasoning text the provider sends. **Tasks** shows the agent's own checklist and updates as work progresses. **Files changed** lists successful file writes/edits with line counts, expandable before/after previews, and an action to open the file. **Activity** tracks tool calls, approvals, retries, failures and results. These details remain available in conversation history; failed edits are never listed as completed file changes.
 
+Running chats remain available in **Sessions**. You can start a new chat or work in another conversation while an agent continues in the background, then reopen the running chat to follow its progress. **Stop** affects only the selected chat.
+
 Wuchat runs in the local VS Code UI extension host, including in Remote-SSH workspaces. Its Playwright browser uses Chrome installed on your local machine; workspace file operations continue through VS Code's remote workspace APIs.
 
 The **Browser** control in Wuchat opens a real, interactive Chrome window, not a streamed preview in the editor. Use **Pick** in Wuchat, then click an element in Chrome to attach its HTML and a screenshot of that element to your next chat message; **Capture** attaches a screenshot of the visible page. Browser actions invoked by agents control this same window. Chrome must be installed locally (or set `CHROME_PATH`); no VS Code startup flags are needed. This is a separate OS window, not VS Code's built-in Browser tab. Selections made with VS Code's own Browser picker still go to VS Code Chat, not Wuchat.

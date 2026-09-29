@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { createInterface as createReadlineInterface } from 'node:readline';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
@@ -35,7 +34,7 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (process.argv.includes('--help') || process.argv.includes('-h')) {
-		console.log('Wuchat CLI\n\nUsage: wuchat [login|logout|sessions] [--connected] [--session ID] [--agent ask|agent] [--yes]\n\nlogin: configure the Z.AI API key for direct CLI use, independent of VS Code.\nlogout: remove saved direct CLI credentials.\nsessions: list saved CLI sessions.\nClaude Plan and ChatGPT Codex use their VS Code sign-in provider.\nIn-chat commands: /model, /sessions, /history, /exit.\nRun inside tmux to keep a session alive across SSH disconnects.');
+		console.log('Wuchat CLI\n\nUsage: wuchat [login|logout|sessions] [--connected] [--session ID] [--agent ask|agent] [--yes]\n\nlogin: configure the Z.AI API key for direct CLI use.\nlogout: remove saved direct CLI credentials.\nsessions: list saved CLI sessions.\nClaude and ChatGPT Codex use OAuth sign-in; import them with Wuchat: Import CLI Login in VS Code.\nIn-chat commands: /model, /sessions, /history, /exit.\nRun inside tmux to keep a session alive across SSH disconnects.');
 		return;
 	}
 	if (process.argv[2] === 'sessions') {
@@ -283,7 +282,7 @@ async function writeSession(
 	messages: ChatMessage[],
 	provider: string,
 	model: string,
-	status: 'running' | 'completed' | 'failed',
+	status: 'running' | 'completed' | 'failed' | 'interrupted',
 	pid?: number
 ): Promise<void> {
 	await writeFile(file, JSON.stringify({ id, workspace: root, updatedAt: new Date().toISOString(), provider, model, status, pid, messages }, null, 2), { mode: 0o600 });

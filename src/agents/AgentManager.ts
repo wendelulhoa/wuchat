@@ -8,9 +8,9 @@ import { Agent, AgentCapabilities } from '../common/types';
 import { ToolRegistry } from '../tools/ToolRegistry';
 import { BaseAgent } from './Agent';
 
-const readWorkspaceCaps: AgentCapabilities = { readEditor: true, readWorkspace: true, editFiles: false, runTerminal: false };
+const readWorkspaceCaps: AgentCapabilities = { readEditor: true, readWorkspace: true, editFiles: false, runTerminal: true };
 const fullCaps: AgentCapabilities = { readEditor: true, readWorkspace: true, editFiles: true, runTerminal: true };
-const allTools = ['wuchat.readFile', 'wuchat.writeFile', 'wuchat.openFile', 'wuchat.runCommand', 'wuchat.listWorkspace', 'wuchat.applyEdit', 'wuchat.updateTodos', 'wuchat.runPlaywright', 'wuchat.browser'];
+const allTools = ['wuchat.readFile', 'wuchat.writeFile', 'wuchat.openFile', 'wuchat.runCommand', 'wuchat.listWorkspace', 'wuchat.deleteFile', 'wuchat.applyEdit', 'wuchat.updateTodos', 'wuchat.runPlaywright', 'wuchat.browser'];
 
 export class AgentManager {
 	private readonly agents = new Map<string, Agent>();
@@ -24,9 +24,9 @@ export class AgentManager {
 		this.register(new BaseAgent({
 			id: 'wuchat.ask',
 			name: 'Ask',
-			description: 'Answers questions about your code and workspace. Read-only.',
-			systemPrompt: 'You are Wuchat Ask, a concise coding assistant embedded in VS Code. Answer clearly, use fenced code blocks for code, and prefer Markdown.',
-			tools: ['wuchat.readFile', 'wuchat.listWorkspace', 'wuchat.openFile'],
+			description: 'Answers questions about your code and workspace. Can browse the filesystem (read-only) and run read-only terminal commands.',
+			systemPrompt: 'You are Wuchat Ask, a concise coding assistant embedded in VS Code. Answer clearly, use fenced code blocks for code, and prefer Markdown. You can read files, list directories (including absolute paths outside the workspace, e.g. /home/user/other-project) and run terminal commands to inspect systems. Never modify files: deletions, writes and edits are reserved for the Agent. When the user points to a folder, navigate to it and look before answering.',
+			tools: ['wuchat.readFile', 'wuchat.listWorkspace', 'wuchat.openFile', 'wuchat.runCommand'],
 			capabilities: readWorkspaceCaps,
 			runtime: extensionAgentRuntime
 		}, this.toolRegistry));
@@ -46,9 +46,9 @@ export class AgentManager {
 			name: 'Agent',
 			description: 'Coding agent that reads and edits files or runs commands with approval.',
 			systemPrompt: 'You are Wuchat Agent, an autonomous coding agent inside VS Code. For multi-step work, use updateTodos to show a short task list, update it as tasks start and complete, and verify before marking a task completed. Use the supplied structured tools directly when needed. Prefer minimal, focused changes. If a tool fails, inspect its error, correct the input or use another tool, and continue the task.',
-			tools: [...new Set([...allTools, ...customTools()])],
+			tools: allTools,
 			capabilities: fullCaps,
-			runtime: extensionAgentRuntime
+			runtime: { ...extensionAgentRuntime, additionalTools: customTools }
 		}, this.toolRegistry));
 	}
 
@@ -193,9 +193,11 @@ function mapAgentTools(declared?: string[]): string[] {
 		else if (allTools.includes(value)) tools.add(value);
 		else if (['read', 'search', 'search/codebase', 'search/files'].includes(normalized)) ['wuchat.readFile', 'wuchat.listWorkspace', 'wuchat.openFile'].forEach(tool => tools.add(tool));
 		else if (normalized === 'edit') ['wuchat.writeFile', 'wuchat.applyEdit'].forEach(tool => tools.add(tool));
+		else if (['delete', 'deletion'].includes(normalized)) tools.add('wuchat.deleteFile');
 		else if (['terminal', 'runinterminal'].includes(normalized)) tools.add('wuchat.runCommand');
 		else if (normalized === 'playwright') tools.add('wuchat.runPlaywright');
 		else if (normalized === 'browser') tools.add('wuchat.browser');
+		else if (value.startsWith('mcp.')) tools.add(value);
 	}
 	return [...tools];
 }
